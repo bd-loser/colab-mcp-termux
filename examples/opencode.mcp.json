@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "colab-exec": {
+      "type": "local",
+      "command": [
+        "/data/data/com.termux/files/usr/bin/python3",
+        "/data/data/com.termux/files/home/.local/share/colab-mcp/colab_mcp_dns.py"
+      ],
+      "enabled": true
+    }
+  }
+}
