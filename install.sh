@@ -140,6 +140,9 @@ else
       export CARGO_PROFILE_RELEASE_LTO=thin
       export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
       export CARGO_PROFILE_RELEASE_STRIP=true
+      # maturin cannot detect the Android API level inside containers (no
+      # getprop); Termux arm64 clang targets API 24, matching the wheel tag.
+      export ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-24}"
       say "Compiling pydantic-core (thin LTO, ~10-25 min)"
       "$MATURIN" build --release --out "$WORK/dist" -i python3
     )

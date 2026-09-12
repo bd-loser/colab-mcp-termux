@@ -55,6 +55,7 @@ CARGO_BUILD_JOBS=2 \
 CARGO_PROFILE_RELEASE_LTO=thin \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
 CARGO_PROFILE_RELEASE_STRIP=true \
+ANDROID_API_LEVEL=24 \
 maturin build --release --out dist -i python3
 
 uv pip install --system dist/pydantic_core-*.whl
@@ -85,6 +86,7 @@ the source**:
 | `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` | `16` | parallel codegen, less RAM per unit |
 | `CARGO_PROFILE_RELEASE_STRIP` | `true` | keep the resulting wheel small |
 | `CARGO_BUILD_JOBS` | `2` (or `1`) | cap concurrent rustc processes |
+| `ANDROID_API_LEVEL` | `24` | required in containers (no `getprop`); matches the Termux arm64 clang target |
 
 The trade-off is a marginally slower extension at runtime - irrelevant for
 orchestration code that runs a few times per session.
