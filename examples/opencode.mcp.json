@@ -5,7 +5,7 @@
       "type": "local",
       "command": [
         "/data/data/com.termux/files/usr/bin/python3",
-        "/data/data/com.termux/files/home/.local/share/colab-mcp/colab_mcp_dns.py"
+        "/data/data/com.termux/files/home/.local/share/colab-mcp/colab_persistent.py"
       ],
       "enabled": true
     }

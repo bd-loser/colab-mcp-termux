@@ -101,9 +101,34 @@ version that satisfies `pyjwt[crypto]`).
 
 ## 8. Runtime seems to vanish between calls
 
-**Not a bug.** `_run_on_colab` unassigns the runtime in a `finally` block, so
-each tool call allocates and releases a fresh GPU. Use one call per job; for
-long-lived hosting, run a notebook instead.
+Only with the **plain launcher** (`colab_mcp_dns.py`): the upstream server
+unassigns the runtime after every call, so each tool call gets a fresh GPU.
+The **persistent launcher** (`colab_persistent.py`) keeps the runtime and
+kernel warm across calls and resumes the session after restarts; call
+`colab_kernel_reset` to release the GPU on demand.
+
+## 8b. "kernel busy" error from `colab_execute`
+
+Another cell is still running on the kernel (possibly from another client
+or process). Use `colab_kernel_busy` to check, `colab_interrupt` to stop
+the running cell (state is kept), or `colab_kernel_new` to get a fresh
+kernel on the same runtime. The `busy_wait` parameter controls how long a
+call waits before failing.
+
+## 8c. HTTP 412 (Precondition Failed) when allocating
+
+Colab allows one runtime per account; a leftover assignment (e.g. from a
+crashed process) blocks new allocations. The persistent launcher detects
+this and automatically discovers, releases, and retries. To clean up
+manually, call `colab_kernel_reset` from a working session or run
+`scripts/verify.sh` (which triggers the same recovery).
+
+## 8d. Exposed tunnel URL unreachable from the phone
+
+Fresh `trycloudflare.com` hostnames can take a few seconds to propagate in
+public DNS. The DNS wrapper resolves them via DoH endpoints (including
+bare-IP forms), so retries usually succeed within seconds; the URL also
+changes every time `colab_expose` re-runs.
 
 ## 9. `Timed out creating kernel session`
 

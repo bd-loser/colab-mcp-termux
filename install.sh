@@ -85,11 +85,12 @@ fi
 say "Installing mcp-server-colab-exec with mcp<2"
 uv pip install --system mcp-server-colab-exec "mcp[cli]<2"
 
-# --- 5. DNS-over-HTTPS wrapper -------------------------------------------
-say "Installing DNS wrapper to $INSTALL_DIR"
+# --- 5. launchers (DNS wrapper + persistent warm kernel) -------------------
+say "Installing launchers to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR/scripts/colab_mcp_dns.py" "$INSTALL_DIR/colab_mcp_dns.py"
-chmod +x "$INSTALL_DIR/colab_mcp_dns.py"
+cp "$SCRIPT_DIR/scripts/colab_persistent.py" "$INSTALL_DIR/colab_persistent.py"
+chmod +x "$INSTALL_DIR/colab_mcp_dns.py" "$INSTALL_DIR/colab_persistent.py"
 
 cat <<EOF
 
@@ -103,13 +104,19 @@ Next steps
 
    The token is cached at ~/.config/colab-exec/token.json.
 
-2) Point your MCP client at the DNS-patched launcher:
+2) Point your MCP client at the persistent launcher (recommended):
 
    command:   python3
-   args:      $INSTALL_DIR/colab_mcp_dns.py
+   args:      $INSTALL_DIR/colab_persistent.py
+
+   This keeps one Colab runtime + kernel warm across tool calls and
+   exposes 23 tools (see docs/TOOLS.md). For the plain DNS-patched
+   upstream server (3 tools, runtime released after every call) use
+   $INSTALL_DIR/colab_mcp_dns.py instead.
 
    Example opencode config: examples/opencode.mcp.json
    Example result:          scripts/verify.sh  (allocates a free T4 and prints the GPU)
+   Launcher tests:          python3 tests/test_colab_persistent.py
 
-Docs: docs/ARCHITECTURE.md, docs/TROUBLESHOOTING.md, docs/BUILD-FROM-SOURCE.md
+Docs: docs/TOOLS.md, docs/ARCHITECTURE.md, docs/TROUBLESHOOTING.md, docs/BUILD-FROM-SOURCE.md
 EOF

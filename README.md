@@ -1,14 +1,17 @@
-# Google Colab MCP Server on Termux (Android) — complete source build
+# Google Colab MCP on Termux (Android) — persistent warm kernels
 
-> Run **Google Colab GPU runtimes (T4 / L4)** from any **MCP** client —
+> Run **Google Colab GPU runtimes (T4 / L4 / CPU)** from any **MCP** client —
 > opencode, Claude Code, Gemini CLI, Cursor, Cline — **directly from an
-> Android phone via Termux**. No root, no desktop, no prebuilt wheels required.
+> Android phone via Termux**. No root, no desktop, no prebuilt wheels
+> required. Runtimes stay **warm between calls**, so a model loaded once
+> stays in VRAM.
 
 `mcp-server-colab-exec` normally installs in seconds on a Linux desktop. On
 **Termux aarch64** it does not: `pydantic-core` has no Android wheel, Termux's
-`pip` cannot build it, and mobile DNS often breaks Colab outright. This project
-ships a **one-command installer** plus a **DNS-over-HTTPS wrapper** that makes it
-work end-to-end — verified by allocating a real Tesla T4.
+`pip` cannot build it, and mobile DNS often breaks Colab outright. This
+project ships a **one-command installer** plus two launchers — a
+**DNS-over-HTTPS wrapper** and a **persistent-kernel launcher** exposing
+**23 MCP tools** — verified end-to-end on a real Tesla T4.
 
 ```
 python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
@@ -26,6 +29,7 @@ python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
 | `mcp 2.x` removed `FastMCP` → server crashes | Pins **`mcp[cli]<2`** |
 | Resolver returns IPv6-only → `[Errno 113] No route to host` | **DNS-over-HTTPS + IPv4 preference** wrapper |
 | OAuth URL impossible to paste on a phone | Opens the consent page in the browser automatically |
+| Upstream server releases the GPU after every call → model reloads each request | **Persistent-kernel launcher** keeps one runtime + kernel warm across calls |
 
 ---
 
@@ -34,12 +38,12 @@ python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
 ```bash
 git clone https://github.com/bd-loser/colab-mcp-termux.git
 cd colab-mcp-termux
-bash install.sh          # installs deps + builds maturin & pydantic-core
+bash install.sh              # installs deps + builds maturin & pydantic-core
 bash scripts/colab-auth.sh   # one-time Google sign-in (opens your browser)
 bash scripts/verify.sh       # allocates a free T4 and prints the GPU
 ```
 
-Then point your MCP client at the DNS-patched launcher:
+Then point your MCP client at the persistent launcher:
 
 ```json
 {
@@ -48,7 +52,7 @@ Then point your MCP client at the DNS-patched launcher:
       "type": "local",
       "command": [
         "/data/data/com.termux/files/usr/bin/python3",
-        "/data/data/com.termux/files/home/.local/share/colab-mcp/colab_mcp_dns.py"
+        "/data/data/com.termux/files/home/.local/share/colab-mcp/colab_persistent.py"
       ],
       "enabled": true
     }
@@ -65,16 +69,22 @@ Full example: [`examples/opencode.mcp.json`](examples/opencode.mcp.json).
 
 ## What you get
 
-Three MCP tools, callable by any MCP-compatible assistant:
+**23 MCP tools** (full reference: [`docs/TOOLS.md`](docs/TOOLS.md)):
 
-| Tool | Description |
+| Category | Tools |
 |---|---|
-| `colab_execute` | Run inline Python on a Colab GPU (T4 / L4) |
-| `colab_execute_file` | Run a local `.py` file on a Colab GPU |
-| `colab_execute_notebook` | Run code **and download generated artifacts** (models, CSVs, images) to the phone |
+| Execution (warm) | `colab_execute`, `colab_execute_file`, `colab_execute_notebook` |
+| Background jobs | `colab_execute_detached`, `colab_job_status` |
+| Kernel lifecycle | `colab_kernel_busy`, `colab_kernel_info`, `colab_interrupt`, `colab_kernel_restart`, `colab_kernel_reset`, `colab_kernel_new`, `colab_kernel_use`, `colab_kernel_list`, `colab_kernel_close`, `colab_kernels_prune` |
+| Introspection | `colab_namespace`, `colab_inspect`, `colab_check_syntax` |
+| Files | `colab_upload`, `colab_download` |
+| Environment | `colab_env_snapshot`, `colab_env_restore` |
+| Networking | `colab_expose`, `colab_expose_status` |
 
-Typical uses: `pip install` something on a T4, train or evaluate a model,
-generate an artifact, read the GPU name — all from a chat client.
+Typical uses: load a model once and serve it for the session, run training
+jobs in the background with a live log tail, push datasets and pull
+adapters, publish an inference endpoint on a public URL — all from a chat
+client on the phone.
 
 ---
 
@@ -92,29 +102,36 @@ generate an artifact, read the GPU name — all from a chat client.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
-MCP client  ──stdio──▶  colab_mcp_dns.py  ──▶  mcp-server-colab-exec
-                        (getaddrinfo patch)         │
-                                                    ▼
-                                 Colab internal API (/tun/m/assign)
-                                                    │
-                                                    ▼
-                                 T4 runtime · Jupyter kernel · WebSocket
+MCP client ──stdio──▶ colab_persistent.py ──▶ mcp-server-colab-exec
+                      ├─ DNS patch (IPv4 + DoH)
+                      ├─ warm session + kernel registry          │
+                      └─ kernel control / WS probes               ▼
+                                          Colab internal API (/tun/m/assign)
+                                                               │
+                                                               ▼
+                                          T4 runtime · Jupyter kernels · WebSocket
 ```
 
-### Runtimes are ephemeral (by design)
+### Runtimes are warm by default
 
-The upstream server **releases the GPU after every call**. This is ideal for
-**one-shot GPU jobs** (training, evaluation, artifact generation) and is *not*
-a way to host a long-running server between calls. Plan one call per job.
+The launcher keeps one runtime and its kernels alive across tool calls
+(the upstream server releases the GPU after every call). The session is
+persisted to `~/.config/colab-exec/session.json` and resumed after client
+restarts; `colab_kernel_reset` releases the GPU on demand. Holding the
+runtime is equivalent to keeping a notebook open in a browser — free-tier
+session limits and quotas still apply.
 
 ---
 
 ## Documentation
 
-* [Architecture](docs/ARCHITECTURE.md) — components, lifecycle, DNS wrapper
+* [Tool reference](docs/TOOLS.md) — all 23 tools, parameters, examples
+* [Architecture](docs/ARCHITECTURE.md) — components, session model, DNS wrapper
 * [Building the Rust deps from source](docs/BUILD-FROM-SOURCE.md) — `maturin`,
   `pydantic-core`, memory-safe Cargo profile, `uv`
-* [Troubleshooting](docs/TROUBLESHOOTING.md) — every error encountered, with fixes
+* [Troubleshooting](docs/TROUBLESHOOTING.md) — known failure modes and fixes
+* [Tests](tests/test_colab_persistent.py) — 36 mock tests for the launcher
+  (no network, no GPU required)
 
 ---
 
@@ -139,11 +156,14 @@ Yes. Only Termux packages and user-space Python are used.
 **Why does it need DNS-over-HTTPS?**
 Many Android resolvers return IPv6-only answers for `colab.research.google.com`
 while IPv6 is unrouted, producing `No route to host`. The wrapper prefers IPv4
-and resolves via `dns.google` when needed.
+and resolves via public DoH endpoints when needed.
 
-**Can it host a model server permanently?**
-No. Each tool call allocates and releases the runtime. For persistent hosting,
-run a notebook/tunnel yourself.
+**Can it host a model server?**
+Within a session, yes: load the model once, start an HTTP server in a
+background thread, and call `colab_expose` to get a public HTTPS URL. The
+model stays in VRAM for the life of the runtime; re-running `colab_expose`
+replaces a dead tunnel without reloading. This is not a permanent hosting
+solution — free-tier runtimes are reclaimed eventually.
 
 **How long does installation take?**
 ~15-40 minutes, almost entirely compiling `maturin` and `pydantic-core`.
@@ -155,9 +175,10 @@ run a notebook/tunnel yourself.
 `mcp-server-colab-exec` drives Google Colab through its **unofficial internal
 API** using the Colab VS Code extension's OAuth client. This may be
 rate-limited, blocked, or changed by Google at any time, and may be subject to
-Colab's Terms of Service. Free GPU capacity is variable. Use responsibly and at
-your own risk. This repository provides build tooling and a network fix only;
-it does not bundle Google credentials.
+Colab's Terms of Service. Free GPU capacity is variable. Holding runtimes
+between calls is equivalent to keeping a notebook open in a browser. Use
+responsibly and at your own risk. This repository provides build tooling and a
+network fix only; it does not bundle Google credentials.
 
 ## Credits
 
