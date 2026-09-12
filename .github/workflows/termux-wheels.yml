@@ -30,12 +30,13 @@ jobs:
           chmod -R a+rwX .
           docker pull --platform linux/arm64 termux/termux-docker:aarch64
           START=$(date +%s)
+          # The image entrypoint runs commands via `env -i`, so -e flags are
+          # dropped; pass settings as exports inside the command instead.
           docker run --rm --privileged --platform linux/arm64 \
-            -e COLAB_MCP_WHEEL_OUT=/work/out \
-            -e CARGO_BUILD_JOBS=4 \
             -v "$PWD:/work" -w /work \
             termux/termux-docker:aarch64 \
             bash -c 'set -e
+                     export COLAB_MCP_WHEEL_OUT=/work/out CARGO_BUILD_JOBS=4
                      time bash install.sh
                      echo; echo "=== mock tests ==="
                      python3 tests/test_colab_persistent.py'

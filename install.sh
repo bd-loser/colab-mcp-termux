@@ -33,7 +33,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # --- sanity ---------------------------------------------------------------
 [ -x "$PX/bin/pkg" ] || die "This script targets Termux (PREFIX=$PX not found)."
-command -v python3 >/dev/null || die "python3 missing; run: pkg install python"
+if ! command -v python3 >/dev/null 2>&1; then
+  say "python3 missing - installing it first (fresh bootstrap)"
+  pkg update -y >/dev/null
+  pkg install -y python >/dev/null
+fi
+command -v python3 >/dev/null 2>&1 || die "python3 could not be installed; run: pkg install python"
 
 # --- 1. base system packages ----------------------------------------------
 say "Installing base packages (python, uv, rpds-py, cryptography)"
