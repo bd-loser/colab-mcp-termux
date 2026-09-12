@@ -125,8 +125,12 @@ Yes. This repo runs a Colab GPU MCP server on Termux and executes Python on a
 real Tesla T4, with no root access.
 
 **Is there an official Google Colab MCP server?**
-No. `mcp-server-colab-exec` is community software that uses Colab's internal
-API. This project only packages and fixes it for Termux.
+Yes — [`googlecolab/colab-mcp`](https://github.com/googlecolab/colab-mcp).
+However, it bridges to a **browser-based Colab session** via WebSocket, which
+requires a human to open Colab in a browser and click "Connect". On headless
+Termux there is no browser tab to bridge to. We use
+[`anomalyco/colab-exec`](https://github.com/anomalyco/colab-exec) instead — it
+executes code via Colab's API directly, no browser needed.
 
 **Does this work on non-rooted phones?**
 Yes. Only Termux packages and user-space Python are used.
@@ -156,7 +160,11 @@ it does not bundle Google credentials.
 
 ## Credits
 
-* [`pdwi2020/mcp-server-colab-exec`](https://github.com/pdwi2020/mcp-server-colab-exec) — the MCP server
+* [`anomalyco/colab-exec`](https://github.com/anomalyco/colab-exec) — the MCP
+  server (PyPI: `mcp-server-colab-exec`). This repo packages and fixes it for
+  Termux.
+* [`googlecolab/colab-mcp`](https://github.com/googlecolab/colab-mcp) —
+  Google's official Colab MCP (browser-bridged, not used here).
 * [Astral `uv`](https://github.com/astral-sh/uv) — Python packaging
 * [PyO3 / maturin](https://github.com/PyO3/maturin) — Rust Python extensions
 
