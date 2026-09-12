@@ -1,0 +1,142 @@
+name: termux-wheels
+
+# Builds the pydantic-core wheel for Termux (Android arm64) inside the
+# official Termux container on a native arm64 runner, verifies a fresh
+# install using only the prebuilt wheel, and attaches the wheel to a
+# GitHub Release on version tags.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1" # weekly: rebuild against the latest pydantic
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: termux-wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build pydantic-core wheel (Termux aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Full source install + tests in Termux container (timed)
+        run: |
+          mkdir -p out
+          docker pull --platform linux/arm64 ghcr.io/termux/termux:latest
+          START=$(date +%s)
+          docker run --rm --platform linux/arm64 \
+            -e HOME=/root \
+            -e COLAB_MCP_WHEEL_OUT=/work/out \
+            -e CARGO_BUILD_JOBS=4 \
+            -v "$PWD:/work" -w /work \
+            ghcr.io/termux/termux:latest \
+            bash -c 'set -e
+                     time bash install.sh
+                     echo; echo "=== mock tests ==="
+                     python3 tests/test_colab_persistent.py'
+          END=$(date +%s)
+          MIN=$(( (END-START)/60 )); SEC=$(( (END-START)%60 ))
+          echo "full source install + mock tests: ${MIN}m${SEC}s (arm64 runner, 4 vCPU)" \
+            | tee out/timing.txt
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Termux wheel build"
+            echo '```'
+            cat out/timing.txt 2>/dev/null || echo "no timing captured"
+            ls -lh out/*.whl 2>/dev/null || echo "no wheel"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload wheel + timing
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-wheel
+          path: out/
+          if-no-files-found: error
+
+  verify-fast-path:
+    name: Verify fresh install from prebuilt wheel
+    runs-on: ubuntu-24.04-arm
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: termux-wheel
+          path: wheel/
+
+      - name: Install from wheel only + tests in a fresh Termux container (timed)
+        run: |
+          mkdir -p dist
+          cp wheel/pydantic_core-*.whl dist/
+          docker pull --platform linux/arm64 ghcr.io/termux/termux:latest
+          START=$(date +%s)
+          docker run --rm --platform linux/arm64 \
+            -e HOME=/root \
+            -v "$PWD:/work" -w /work \
+            ghcr.io/termux/termux:latest \
+            bash -c 'set -e
+                     time bash install.sh
+                     echo; echo "=== mock tests ==="
+                     python3 tests/test_colab_persistent.py
+                     echo
+                     python3 -c "import pydantic_core, mcp, mcp_server_colab_exec, sys; print(\"fast-path imports ok: pydantic-core\", pydantic_core.__version__, \"| python\", sys.version.split()[0])"'
+          END=$(date +%s)
+          MIN=$(( (END-START)/60 )); SEC=$(( (END-START)%60 ))
+          echo "fast-path install (wheel) + mock tests: ${MIN}m${SEC}s (arm64 runner, 4 vCPU)" \
+            | tee wheel-fast-path-timing.txt
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Fast-path verification (prebuilt wheel)"
+            echo '```'
+            cat wheel-fast-path-timing.txt 2>/dev/null || echo "no timing captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload timing
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-path-timing
+          path: wheel-fast-path-timing.txt
+          if-no-files-found: error
+
+  release:
+    name: Attach wheel to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build, verify-fast-path]
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: termux-wheel
+          path: wheel/
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "$TAG" \
+                 --notes "Prebuilt Termux (Android arm64) wheel for pydantic-core, built by CI in the official Termux container. install.sh downloads it automatically; see README for details."
+          gh release upload "$TAG" wheel/pydantic_core-*.whl --clobber \
+            --repo "$GITHUB_REPOSITORY"

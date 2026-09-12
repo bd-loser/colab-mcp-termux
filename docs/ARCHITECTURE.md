@@ -45,6 +45,7 @@ on top of the server.
 | `scripts/verify.sh` | Allocates a free T4 and prints the GPU name (end-to-end check). |
 | `install.sh` | Reproduces the full source build (maturin + pydantic-core) and installs both launchers. |
 | `tests/test_colab_persistent.py` | 36 mock tests for the launcher — fakes for every Colab API, no network or GPU needed. |
+| `.github/workflows/termux-wheels.yml` | CI: builds the `pydantic-core` wheel in the official Termux container on arm64 runners, verifies a fresh wheel-only install, publishes wheels to Releases (tag builds). |
 
 ## Session persistence layer
 

@@ -1,5 +1,21 @@
 # Building the Rust dependencies from source
 
+## Prebuilt wheels (preferred)
+
+CI ([`.github/workflows/termux-wheels.yml`](../.github/workflows/termux-wheels.yml))
+builds the `pydantic-core` wheel inside the official Termux container
+(`ghcr.io/termux/termux`) on a native arm64 GitHub runner and attaches it to
+GitHub Releases. `install.sh` automatically downloads the wheel matching your
+Python tag (`cpXY`) and the `pydantic-core` version required by the current
+`pydantic`; the source build documented below is only the fallback.
+
+Wheel compatibility: **Android arm64 (bionic), API 24+, Termux Python 3.14**
+(`cp314-cp314-android_24_arm64_v8a`). Not for glibc aarch64 systems
+(Raspberry Pi, ARM servers) — upstream `pip` installs manylinux wheels there
+directly and this repo is not needed.
+
+## Why a source build is sometimes needed
+
 `mcp-server-colab-exec` depends on `mcp[cli]`, which depends on `pydantic`,
 which depends on **`pydantic-core`** - a Rust extension. Termux has no
 prebuilt wheel for `pydantic-core` (manylinux wheels are glibc-based and do

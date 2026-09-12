@@ -6,6 +6,8 @@
 > required. Runtimes stay **warm between calls**, so a model loaded once
 > stays in VRAM.
 
+[![termux-wheels](https://github.com/bd-loser/colab-mcp-termux/actions/workflows/termux-wheels.yml/badge.svg)](https://github.com/bd-loser/colab-mcp-termux/actions/workflows/termux-wheels.yml)
+
 `mcp-server-colab-exec` normally installs in seconds on a Linux desktop. On
 **Termux aarch64** it does not: `pydantic-core` has no Android wheel, Termux's
 `pip` cannot build it, and mobile DNS often breaks Colab outright. This
@@ -30,6 +32,7 @@ python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
 | Resolver returns IPv6-only → `[Errno 113] No route to host` | **DNS-over-HTTPS + IPv4 preference** wrapper |
 | OAuth URL impossible to paste on a phone | Opens the consent page in the browser automatically |
 | Upstream server releases the GPU after every call → model reloads each request | **Persistent-kernel launcher** keeps one runtime + kernel warm across calls |
+| First install compiles Rust for 15-40 min on a phone | **CI-built prebuilt wheels** on Releases (Termux container on arm64 runners) — installs in ~2-3 min; source build remains the fallback |
 
 ---
 
@@ -38,7 +41,7 @@ python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
 ```bash
 git clone https://github.com/bd-loser/colab-mcp-termux.git
 cd colab-mcp-termux
-bash install.sh              # installs deps + builds maturin & pydantic-core
+bash install.sh              # deps + pydantic-core (prebuilt wheel if available)
 bash scripts/colab-auth.sh   # one-time Google sign-in (opens your browser)
 bash scripts/verify.sh       # allocates a free T4 and prints the GPU
 ```
@@ -132,6 +135,9 @@ session limits and quotas still apply.
 * [Troubleshooting](docs/TROUBLESHOOTING.md) — known failure modes and fixes
 * [Tests](tests/test_colab_persistent.py) — 36 mock tests for the launcher
   (no network, no GPU required)
+* [CI workflow](.github/workflows/termux-wheels.yml) — builds the
+  pydantic-core wheel in the official Termux container on arm64 runners,
+  verifies a fresh install from the wheel, publishes to Releases
 
 ---
 
@@ -166,7 +172,11 @@ replaces a dead tunnel without reloading. This is not a permanent hosting
 solution — free-tier runtimes are reclaimed eventually.
 
 **How long does installation take?**
-~15-40 minutes, almost entirely compiling `maturin` and `pydantic-core`.
+~2-3 minutes when a prebuilt wheel matching your Python version is available
+on [Releases](https://github.com/bd-loser/colab-mcp-termux/releases) —
+`install.sh` downloads it automatically. Without a matching wheel it falls
+back to a source build: ~15-40 minutes, almost entirely compiling `maturin`
+and `pydantic-core`.
 
 ---
 
