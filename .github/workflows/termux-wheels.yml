@@ -27,14 +27,14 @@ jobs:
       - name: Full source install + tests in Termux container (timed)
         run: |
           mkdir -p out
-          docker pull --platform linux/arm64 ghcr.io/termux/termux:latest
+          chmod -R a+rwX .
+          docker pull --platform linux/arm64 termux/termux-docker:aarch64
           START=$(date +%s)
-          docker run --rm --platform linux/arm64 \
-            -e HOME=/root \
+          docker run --rm --privileged --platform linux/arm64 \
             -e COLAB_MCP_WHEEL_OUT=/work/out \
             -e CARGO_BUILD_JOBS=4 \
             -v "$PWD:/work" -w /work \
-            ghcr.io/termux/termux:latest \
+            termux/termux-docker:aarch64 \
             bash -c 'set -e
                      time bash install.sh
                      echo; echo "=== mock tests ==="
@@ -80,12 +80,12 @@ jobs:
         run: |
           mkdir -p dist
           cp wheel/pydantic_core-*.whl dist/
-          docker pull --platform linux/arm64 ghcr.io/termux/termux:latest
+          chmod -R a+rwX .
+          docker pull --platform linux/arm64 termux/termux-docker:aarch64
           START=$(date +%s)
-          docker run --rm --platform linux/arm64 \
-            -e HOME=/root \
+          docker run --rm --privileged --platform linux/arm64 \
             -v "$PWD:/work" -w /work \
-            ghcr.io/termux/termux:latest \
+            termux/termux-docker:aarch64 \
             bash -c 'set -e
                      time bash install.sh
                      echo; echo "=== mock tests ==="
