@@ -129,8 +129,9 @@ Yes — [`googlecolab/colab-mcp`](https://github.com/googlecolab/colab-mcp).
 However, it bridges to a **browser-based Colab session** via WebSocket, which
 requires a human to open Colab in a browser and click "Connect". On headless
 Termux there is no browser tab to bridge to. We use
-[`anomalyco/colab-exec`](https://github.com/anomalyco/colab-exec) instead — it
-executes code via Colab's API directly, no browser needed.
+[`pdwi2020/mcp-server-colab-exec`](https://github.com/pdwi2020/mcp-server-colab-exec)
+(PyPI: `mcp-server-colab-exec`) instead — it executes code via Colab's API
+directly, no browser needed.
 
 **Does this work on non-rooted phones?**
 Yes. Only Termux packages and user-space Python are used.
@@ -160,9 +161,9 @@ it does not bundle Google credentials.
 
 ## Credits
 
-* [`anomalyco/colab-exec`](https://github.com/anomalyco/colab-exec) — the MCP
-  server (PyPI: `mcp-server-colab-exec`). This repo packages and fixes it for
-  Termux.
+* [`pdwi2020/mcp-server-colab-exec`](https://github.com/pdwi2020/mcp-server-colab-exec)
+  — the MCP server (PyPI: `mcp-server-colab-exec`; author Paritosh Dwivedi).
+  This repo packages and fixes it for Termux.
 * [`googlecolab/colab-mcp`](https://github.com/googlecolab/colab-mcp) —
   Google's official Colab MCP (browser-bridged, not used here).
 * [Astral `uv`](https://github.com/astral-sh/uv) — Python packaging
