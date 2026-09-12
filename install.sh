@@ -131,7 +131,8 @@ else
     curl -fsSL "$SRC_URL" -o "$WORK/pydantic_core.tar.gz"
     tar xzf "$WORK/pydantic_core.tar.gz" -C "$WORK"
     (
-      cd "$WORK/pydantic-core-$PDC_VERSION"
+      # sdist root dir is PEP 625 normalized (underscore), not the dash form
+      cd "$WORK"/pydantic[-_]core-"$PDC_VERSION"
       # pydantic-core's release profile uses fat LTO + codegen-units=1, which
       # exhausts RAM on phones. Thin LTO + more units trades a little speed
       # for a build that actually completes.

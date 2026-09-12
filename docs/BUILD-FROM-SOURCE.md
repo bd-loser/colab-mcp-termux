@@ -48,7 +48,7 @@ SRC=$(curl -fsSL "https://pypi.org/pypi/pydantic-core/$PDC/json" | python3 -c \
 
 curl -fsSL "$SRC" -o pydantic_core.tar.gz
 tar xzf pydantic_core.tar.gz
-cd "pydantic-core-$PDC"
+cd pydantic[-_]core-"$PDC"   # sdist root is PEP 625 normalized (underscore)
 
 # Memory-safe profile (see below), then build:
 CARGO_BUILD_JOBS=2 \
