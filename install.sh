@@ -227,9 +227,9 @@ cp "$SCRIPT_DIR/scripts/colab_mcp_dns.py" "$INSTALL_DIR/colab_mcp_dns.py"
 cp "$SCRIPT_DIR/scripts/colab_persistent.py" "$INSTALL_DIR/colab_persistent.py"
 chmod +x "$INSTALL_DIR/colab_mcp_dns.py" "$INSTALL_DIR/colab_persistent.py"
 
-cat <<EOF
+printf '\n\033[1;32mInstall complete.\033[0m\n'
 
-\033[1;32mInstall complete.\033[0m
+cat <<EOF
 
 Next steps
 ----------
