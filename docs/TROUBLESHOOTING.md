@@ -149,3 +149,25 @@ python3 -c "import mcp; print(mcp.__file__)"
 ls -l ~/.config/colab-exec/token.json
 bash scripts/verify.sh
 ```
+
+## 11. `curl` fails to link after package changes (`ngtcp2_conn_get_tls_early_data_rejected2`)
+
+**When:** any `pkg`/`apt` operation after a partial upgrade left `libcurl`
+newer than `libngtcp2`. Affects Termux generally, not only this project;
+`install.sh`'s curl calls then fail with a JSON decode error.
+
+**Fix:** align the two packages:
+
+```bash
+apt update && apt install -y libngtcp2 libcurl curl
+curl -fsSI https://pypi.org/simple/   # should print HTTP/2 200
+```
+
+(Or `apt full-upgrade -y` for a full realignment; on slow links this can
+take a while.)
+
+## 12. `error: The wheel filename "pydantic_core.whl" is invalid: Must have a version`
+
+Fixed in this repo: release wheels are downloaded under their original
+asset names — `uv` validates wheel filenames, so renames break installation.
+If you pinned an older commit, update and re-run `install.sh`.

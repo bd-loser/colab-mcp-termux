@@ -98,10 +98,13 @@ else
     ' "$PDC_VERSION" "$PY_TAG" || true)"
     if [ -n "$WHEEL_URL" ]; then
       DL="$(mktemp -d)"
-      if curl -fsSL "$WHEEL_URL" -o "$DL/pydantic_core.whl" \
-         && wheel_matches "$(basename "$WHEEL_URL")"; then
-        WHEEL="$DL/pydantic_core.whl"
-        say "Downloaded prebuilt wheel: $(basename "$WHEEL_URL")"
+      WHEEL_NAME="$(basename "$WHEEL_URL")"
+      # uv requires a valid wheel filename (name-version-tags), so keep the
+      # original asset name instead of renaming the download.
+      if curl -fsSL "$WHEEL_URL" -o "$DL/$WHEEL_NAME" \
+         && wheel_matches "$WHEEL_NAME"; then
+        WHEEL="$DL/$WHEEL_NAME"
+        say "Downloaded prebuilt wheel: $WHEEL_NAME"
       fi
     fi
   fi

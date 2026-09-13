@@ -7,7 +7,9 @@ builds the `pydantic-core` wheel inside the official Termux container
 (`ghcr.io/termux/termux`) on a native arm64 GitHub runner and attaches it to
 GitHub Releases. `install.sh` automatically downloads the wheel matching your
 Python tag (`cpXY`) and the `pydantic-core` version required by the current
-`pydantic`; the source build documented below is only the fallback.
+`pydantic`; the source build documented below is only the fallback. Measured
+in CI (Termux container, arm64 runner, 4 vCPU): **~8 min source build**,
+**~1.5 min install from wheel**.
 
 Wheel compatibility: **Android arm64 (bionic), API 24+, Termux Python 3.14**
 (`cp314-cp314-android_24_arm64_v8a`). Not for glibc aarch64 systems

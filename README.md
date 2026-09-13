@@ -32,7 +32,7 @@ python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
 | Resolver returns IPv6-only → `[Errno 113] No route to host` | **DNS-over-HTTPS + IPv4 preference** wrapper |
 | OAuth URL impossible to paste on a phone | Opens the consent page in the browser automatically |
 | Upstream server releases the GPU after every call → model reloads each request | **Persistent-kernel launcher** keeps one runtime + kernel warm across calls |
-| First install compiles Rust for 15-40 min on a phone | **CI-built prebuilt wheels** on Releases (Termux container on arm64 runners) — installs in ~2-3 min; source build remains the fallback |
+| First install compiles Rust for 15-40 min on a phone | **CI-built prebuilt wheels** on Releases (Termux container on arm64 runners) — measured ~1.5 min install; source build remains the fallback |
 
 ---
 
@@ -172,11 +172,19 @@ replaces a dead tunnel without reloading. This is not a permanent hosting
 solution — free-tier runtimes are reclaimed eventually.
 
 **How long does installation take?**
-~2-3 minutes when a prebuilt wheel matching your Python version is available
-on [Releases](https://github.com/bd-loser/colab-mcp-termux/releases) —
-`install.sh` downloads it automatically. Without a matching wheel it falls
-back to a source build: ~15-40 minutes, almost entirely compiling `maturin`
-and `pydantic-core`.
+Measured (CI, Termux container on an arm64 runner): **~1.5 minutes** with a
+prebuilt wheel, **~8 minutes** for the full source build. On a phone the
+source build takes longer (~15-40 minutes depending on CPU and RAM); the
+prebuilt-wheel path is what a fresh phone install uses — `install.sh`
+downloads it automatically from
+[Releases](https://github.com/bd-loser/colab-mcp-termux/releases)
+(**16 seconds measured on-device for a complete reinstall**).
+
+**How are releases versioned?**
+Release tags track the upstream [`mcp-server-colab-exec`](https://pypi.org/project/mcp-server-colab-exec/)
+version the wheels were built and verified against — `v0.1.0` ↔ upstream
+`0.1.0` (wheel: `pydantic_core-2.46.5-cp314-cp314-android_24_arm64_v8a.whl`,
+built for `pydantic 2.13.5`).
 
 ---
 
