@@ -1039,12 +1039,12 @@ def install():
                            "kernel_id": kernel_id, "deleted": deleted,
                            "active": state.get("active")})
 
-    def colab_kernels_prune(all: bool = False) -> str:
+    def colab_kernels_prune(all_kernels: bool = False) -> str:
         """Delete orphan kernels on the warm runtime.
 
         Orphans are colab-exec sessions not registered by this launcher
-        (e.g. left by a crashed process). Pass all=true to delete every
-        colab-exec kernel including ours.
+        (e.g. left by a crashed process). Pass all_kernels=true to delete
+        every colab-exec kernel including ours.
         """
         snap = _snap()
         if not snap["endpoint"]:
@@ -1055,7 +1055,7 @@ def install():
             ours = kid in snap["kernels"].values()
             if not (s.get("name") or "").startswith("colab-exec"):
                 continue
-            if ours and not all:
+            if ours and not all_kernels:
                 continue
             try:
                 r = requests.delete(
@@ -1065,7 +1065,7 @@ def install():
                     pruned.append({"kernel_id": kid, "session_id": s.get("id")})
             except Exception:
                 pass
-        if all and state.get("kernels"):
+        if all_kernels and state.get("kernels"):
             with lock:
                 state["kernels"] = {}
                 state["active"] = None

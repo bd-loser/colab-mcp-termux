@@ -143,7 +143,7 @@ Multi-kernel support on one runtime:
 
 Delete orphan `colab-exec*` sessions on the runtime — kernels left behind
 by crashed processes that this launcher did not register. Pass
-`all=true` to delete every colab-exec kernel including ours.
+`all_kernels=true` to delete every colab-exec kernel including ours.
 
 ---
 
