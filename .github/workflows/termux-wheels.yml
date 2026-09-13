@@ -138,6 +138,7 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "$TAG" \
-                 --notes "Prebuilt Termux (Android arm64) wheel for pydantic-core, built by CI in the official Termux container. install.sh downloads it automatically; see README for details."
-          gh release upload "$TAG" wheel/pydantic_core-*.whl --clobber \
+                 --notes "Prebuilt Termux (Android arm64) wheel for pydantic-core, built by CI in the official Termux container. install.sh downloads it automatically and verifies it against checksums.txt; see README for details."
+          (cd wheel && sha256sum pydantic_core-*.whl > checksums.txt)
+          gh release upload "$TAG" wheel/pydantic_core-*.whl wheel/checksums.txt --clobber \
             --repo "$GITHUB_REPOSITORY"

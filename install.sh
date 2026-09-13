@@ -47,6 +47,19 @@ pkg install -y python python-pip uv python-rpds-py python-cryptography \
   curl git unzip tar >/dev/null
 command -v uv >/dev/null || die "uv not found after install (pkg install uv)"
 
+# Record which python packages this install adds (for uninstall.sh). Only
+# the FIRST install writes the manifest; idempotent re-runs keep the
+# original so the uninstall list stays complete.
+MANIFEST="$INSTALL_DIR/installed-packages.txt"
+LIST_PKGS='from importlib.metadata import distributions
+print("\n".join(sorted((d.metadata["Name"] or "").lower() for d in distributions() if d.metadata["Name"])))'
+mkdir -p "$INSTALL_DIR"
+rm -f "$INSTALL_DIR/.after.txt"  # stale from an interrupted run
+if [ ! -f "$MANIFEST" ]; then
+  say "Recording pre-install package list (for uninstall.sh)"
+  python3 -c "$LIST_PKGS" > "$INSTALL_DIR/.before.txt" 2>/dev/null || true
+fi
+
 # --- 2. pydantic-core (Rust) matching the current pydantic -----------------
 # Fast path: prebuilt Termux wheel (COLAB_MCP_LOCAL_WHEEL, ./dist/, or the
 # latest GitHub release of this repo). Slow path: source build — rust +
@@ -69,6 +82,33 @@ wheel_matches() {
     pydantic_core-"$PDC_VERSION"-"$PY_TAG"-"$PY_TAG"-android*_arm64_v8a.whl) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Verify a downloaded wheel against the release's checksums.txt (if the
+# release publishes one). Older releases without checksums pass with a
+# notice; a mismatched checksum is fatal.
+verify_checksum() {  # dir file sums_url
+  local dir="$1" file="$2" sums_url="$3" want got
+  if ! curl -fsSL "$sums_url" -o "$dir/checksums.txt"; then
+    warn "Release has no checksums.txt; skipping checksum verification"
+    return 0
+  fi
+  want="$(awk -v f="$file" '$2 == f {print $1}' "$dir/checksums.txt")"
+  if [ -z "$want" ]; then
+    warn "checksums.txt has no entry for $file; skipping checksum verification"
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    got="$(cd "$dir" && sha256sum "$file" | awk '{print $1}')"
+  else
+    got="$(cd "$dir" && python3 -c \
+      'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' \
+      "$file")"
+  fi
+  if [ "$want" != "$got" ]; then
+    die "Checksum mismatch for $file (want $want, got $got) - aborting"
+  fi
+  return 0
 }
 
 if python3 -c "import pydantic_core,sys; sys.exit(0 if pydantic_core.__version__=='$PDC_VERSION' else 1)" 2>/dev/null; then
@@ -102,9 +142,10 @@ else
       # uv requires a valid wheel filename (name-version-tags), so keep the
       # original asset name instead of renaming the download.
       if curl -fsSL "$WHEEL_URL" -o "$DL/$WHEEL_NAME" \
-         && wheel_matches "$WHEEL_NAME"; then
+         && wheel_matches "$WHEEL_NAME" \
+         && verify_checksum "$DL" "$WHEEL_NAME" "${WHEEL_URL%/*}/checksums.txt"; then
         WHEEL="$DL/$WHEEL_NAME"
-        say "Downloaded prebuilt wheel: $WHEEL_NAME"
+        say "Downloaded prebuilt wheel: $WHEEL_NAME (checksum verified)"
       fi
     fi
   fi
@@ -112,6 +153,7 @@ else
   if [ -n "$WHEEL" ]; then
     say "Installing prebuilt pydantic-core wheel (fast path)"
     uv pip install --system "$WHEEL"
+    [ -n "${DL:-}" ] && rm -rf "$DL"  # downloaded copy; dist/ is never touched
   else
     say "No prebuilt wheel for pydantic-core $PDC_VERSION ($PY_TAG) - building from source"
     say "Installing build toolchain (rust, clang, cmake)"
@@ -165,6 +207,16 @@ fi
 # --- 3. the MCP server (must use the mcp 1.x FastMCP API) -------------------
 say "Installing mcp-server-colab-exec with mcp<2"
 uv pip install --system mcp-server-colab-exec "mcp[cli]<2" "pydantic==$PYDANTIC_VERSION"
+
+# Finalize the uninstall manifest: packages present now but not before.
+if [ ! -f "$MANIFEST" ] && [ -s "$INSTALL_DIR/.before.txt" ]; then
+  python3 -c "$LIST_PKGS" > "$INSTALL_DIR/.after.txt" 2>/dev/null || true
+  comm -13 "$INSTALL_DIR/.before.txt" "$INSTALL_DIR/.after.txt" > "$MANIFEST"
+  rm -f "$INSTALL_DIR/.before.txt" "$INSTALL_DIR/.after.txt"
+  say "Uninstall manifest written: $(wc -l < "$MANIFEST") package(s) added by this install"
+elif [ -f "$MANIFEST" ]; then
+  say "Keeping existing uninstall manifest ($(wc -l < "$MANIFEST") entries)"
+fi
 
 # --- 4. launchers ------------------------------------------------------------
 say "Installing launchers to $INSTALL_DIR"

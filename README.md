@@ -138,6 +138,8 @@ session limits and quotas still apply.
 * [CI workflow](.github/workflows/termux-wheels.yml) — builds the
   pydantic-core wheel in the official Termux container on arm64 runners,
   verifies a fresh install from the wheel, publishes to Releases
+* [uninstall.sh](uninstall.sh) — clean removal (package manifest, optional
+  credential/toolchain purge)
 
 ---
 
@@ -184,7 +186,14 @@ downloads it automatically from
 Release tags track the upstream [`mcp-server-colab-exec`](https://pypi.org/project/mcp-server-colab-exec/)
 version the wheels were built and verified against — `v0.1.0` ↔ upstream
 `0.1.0` (wheel: `pydantic_core-2.46.5-cp314-cp314-android_24_arm64_v8a.whl`,
-built for `pydantic 2.13.5`).
+built for `pydantic 2.13.5`). Wheels are published with a `checksums.txt`
+that `install.sh` verifies before installing.
+
+**How do I uninstall?**
+`bash uninstall.sh` removes the python packages this stack installed
+(recorded by `install.sh` at install time), the launchers, and the install
+dir. It keeps your OAuth token by default (`--purge` removes it) and the
+build toolchain (`--toolchain` removes rust/clang/cmake/maturin).
 
 ---
 
