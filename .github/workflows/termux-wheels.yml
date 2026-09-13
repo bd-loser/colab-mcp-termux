@@ -37,6 +37,7 @@ jobs:
             termux/termux-docker:aarch64 \
             bash -c 'set -e
                      export COLAB_MCP_WHEEL_OUT=/work/out CARGO_BUILD_JOBS=4
+                     export COLAB_MCP_NO_REMOTE_WHEEL=1
                      time bash install.sh
                      echo; echo "=== mock tests ==="
                      python3 tests/test_colab_persistent.py'

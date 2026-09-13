@@ -120,7 +120,9 @@ else
       WHEEL="$cand"; break
     fi
   done
-  if [ -z "$WHEEL" ] && [ -n "$PY_TAG" ]; then
+  # COLAB_MCP_NO_REMOTE_WHEEL=1 skips the release download (CI build jobs
+  # use this so they always compile instead of consuming their own output).
+  if [ -z "$WHEEL" ] && [ -n "$PY_TAG" ] && [ -z "${COLAB_MCP_NO_REMOTE_WHEEL:-}" ]; then
     WHEEL_URL="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | python3 -c '
       import json, sys
       want, tag = sys.argv[1], sys.argv[2]
