@@ -11,10 +11,12 @@ detached jobs with live tail. All Colab APIs are faked; no network, no GPU.
 import base64
 import importlib
 import json
+import logging
 import os
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -147,8 +149,12 @@ def fresh(save_path=None, alive=True):
         if "/api/contents/" in url:
             path = url.split("/api/contents/")[-1]
             if path in store["contents"]:
+                value = store["contents"][path]
+                if isinstance(value, tuple):  # (format, content)
+                    return FakeResp(200, {"format": value[0],
+                                          "content": value[1]})
                 return FakeResp(200, {"format": "base64",
-                                      "content": store["contents"][path]})
+                                      "content": value})
             return FakeResp(404)
         return FakeResp(404)
 
@@ -692,9 +698,89 @@ def test_412_leftover_runtime_recovery():
     assert left["count"] == 3, left
     unassigned = t.calls["unassign"]
     assert unassigned >= 1
-    # final endpoint is e-new
+# final endpoint is e-new
     listing = json.loads(t.srv.colab_kernel_list())
     assert any(k["name"] == "main" for k in listing["kernels"])
+
+
+# ── regressions found in live use (2026-09) ─────────────────────────────────
+
+def test_detached_router_keeps_cell_output_live():
+    # redirect_stdout() in the job thread used to swap the GLOBAL
+    # sys.stdout: every later cell's output vanished into the job buffer
+    # and the job's tail filled with cell noise. The router must capture
+    # ONLY the job thread's writes.
+    import io as _io
+    saved_out, saved_err = sys.stdout, sys.stderr
+    kernel_stream = _io.StringIO()          # stand-in for ipykernel's stdout
+    ns = {}
+    script = colab_persistent.JOB_SCRIPT % {
+        "job": "j-router",
+        "code": "import time\nprint('job-line-1')\n"
+                "time.sleep(0.3)\nprint('job-line-2')\n"}
+    sys.stdout = kernel_stream
+    sys.stderr = _io.StringIO()
+    try:
+        exec(compile(script, "jobscript", "exec"), ns, ns)
+        print("cell-line-during-job")       # main thread while job runs
+        for _ in range(100):
+            if ns["_status"][0]["state"] != "running":
+                break
+            time.sleep(0.05)
+    finally:
+        sys.stdout, sys.stderr = saved_out, saved_err
+    cell_text = kernel_stream.getvalue()
+    job_text = ns["_buf"].getvalue()
+    assert "cell-line-during-job" in cell_text, cell_text
+    assert "started" in cell_text
+    assert "job-line" not in cell_text, cell_text
+    assert "job-line-1" in job_text and "job-line-2" in job_text
+    assert ns["_status"][0]["state"] == "done"
+
+
+def test_job_script_no_global_redirect():
+    assert "redirect_stdout" not in colab_persistent.JOB_SCRIPT
+    assert "redirect_stderr" not in colab_persistent.JOB_SCRIPT
+    assert "current_thread" in colab_persistent.JOB_SCRIPT
+
+
+def test_expose_tunnel_survives_kernel():
+    # Cloudflared as a plain kernel child died with kernel restarts
+    # (Cloudflare error 1033). It must be its own session leader.
+    assert "start_new_session=True" in colab_persistent.EXPOSE_SCRIPT
+
+
+def test_download_rest_text_format():
+    # The contents API serves .txt as format "text"; only accepting
+    # "base64" pushed every text file to the kernel fallback.
+    t = fresh()
+    t.srv._run_on_colab("c1", "T4", 10)
+    t.store["contents"]["/content/model_key.txt"] = ("text", "abc123")
+    dest = os.path.join(tempfile.mkdtemp(), "model_key.txt")
+    result = json.loads(t.srv.colab_download("/content/model_key.txt", dest))
+    assert result["method"] == "rest", result
+    assert open(dest).read() == "abc123"
+    assert t.calls["exec"] == 1  # no kernel fallback cell was executed
+
+
+def test_install_no_duplicate_tool_warnings():
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Grab()
+    root = logging.getLogger("mcp")
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+    try:
+        fresh()
+        fresh()  # a second install() replaces again: still no duplicates
+    finally:
+        root.removeHandler(handler)
+    dupes = [m for m in records if "already exists" in m]
+    assert not dupes, dupes
 
 
 if __name__ == "__main__":

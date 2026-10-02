@@ -30,6 +30,7 @@ import colab_mcp_dns
 SESSION_DIR = os.path.expanduser("~/.config/colab-exec")
 SESSION_PATH = os.path.join(SESSION_DIR, "session.json")
 ENV_SNAPSHOT_PATH = os.path.join(SESSION_DIR, "env_snapshot.txt")
+EVENTS_PATH = os.path.join(SESSION_DIR, "events.log")
 BUSY_WAIT_DEFAULT = 10
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 UPLOAD_FALLBACK_MAX = 8 * 1024 * 1024
@@ -40,12 +41,65 @@ state = {}
 
 JOB_SCRIPT = '''
 import json as _json, threading as _threading, traceback as _tb, time as _time
-import io as _io, contextlib as _ctx
+import io as _io, sys as _sys
 
 _job_file = "/content/job.json"
 _status = [{"job": %(job)r, "state": "running", "started": _time.time(),
             "ended": None, "stdout_tail": None, "error": None}]
 _buf = _io.StringIO()
+_g = globals()
+
+class _Router:
+    """Route ONLY the detached job thread's writes into the capture buffer.
+
+    The old contextlib redirector swapped the GLOBAL sys.stdout, so a
+    background job used to silence every later cell (their prints landed in
+    the job's buffer) and leak cell output into the job's tail. A
+    per-thread router keeps the kernel's real stream working for everyone
+    else."""
+    def __init__(self, real):
+        self._real = real
+        self._thread = None
+        self._buf = None
+    def attach(self, thread, buf):
+        self._thread, self._buf = thread, buf
+    def detach(self):
+        self._thread, self._buf = None, None
+    def _target(self):
+        if (self._buf is not None and self._thread is not None
+                and _threading.current_thread() is self._thread):
+            return self._buf
+        return self._real
+    def write(self, s):
+        self._target().write(s)
+        return len(s)
+    def writelines(self, lines):
+        for _l in lines:
+            self.write(_l)
+    def flush(self):
+        for _s in (self._buf, self._real):
+            try:
+                _s.flush()
+            except Exception:
+                pass
+    def isatty(self):
+        try:
+            return self._real.isatty()
+        except Exception:
+            return False
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+_out = _g.get("_colab_exec_router_out")
+if not isinstance(_out, _Router):
+    _out = _Router(_sys.stdout)
+    _sys.stdout = _out
+_err = _g.get("_colab_exec_router_err")
+if not isinstance(_err, _Router):
+    _err = _Router(_sys.stderr)
+    _sys.stderr = _err
+_g["_colab_exec_router_out"] = _out
+_g["_colab_exec_router_err"] = _err
 
 def _write_status():
     try:
@@ -58,14 +112,15 @@ def _write_status():
 
 def _run_job():
     _write_status()
-    _g = globals()
     try:
-        with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
-            exec(compile(%(code)r, %(job)r, "exec"), _g, _g)
+        exec(compile(%(code)r, %(job)r, "exec"), _g, _g)
         _status[0]["state"] = "done"
     except BaseException as _e:
         _status[0]["state"] = "error"
         _status[0]["error"] = "".join(_tb.format_exception_only(type(_e), _e)).strip()
+    finally:
+        _out.detach()
+        _err.detach()
     _status[0]["stdout_tail"] = _buf.getvalue()[-4000:]
     _status[0]["ended"] = _time.time()
     _write_status()
@@ -83,6 +138,8 @@ def _monitor(_stop):
 _stop = _threading.Event()
 _threading.Thread(target=_monitor, args=(_stop,), daemon=True).start()
 _t = _threading.Thread(target=_run_job, name=%(job)r, daemon=True)
+_out.attach(_t, _buf)
+_err.attach(_t, _buf)
 _t.start()
 print("[detached] started", %(job)r)
 '''
@@ -112,9 +169,12 @@ if not _binary.exists():
         _binary)
     _binary.chmod(0o755)
 _log = open(f"/content/tunnel_{_port}.log", "w")
+# start_new_session: the tunnel must OUTLIVE kernel restarts/prunes; as a
+# plain kernel child it died with them (Cloudflare error 1033 observed).
 _p = subprocess.Popen([str(_binary), "tunnel", "--url",
                        f"http://127.0.0.1:{_port}"],
-                      stdout=_log, stderr=subprocess.STDOUT)
+                      stdout=_log, stderr=subprocess.STDOUT,
+                      start_new_session=True)
 _url = None
 for _ in range(%(wait_cycles)d):
     if _p.poll() is not None:
@@ -188,6 +248,41 @@ def install():
             os.chmod(SESSION_PATH, 0o600)
         except Exception as exc:
             print(f"[persist] session save failed: {exc}", file=sys.stderr)
+
+    def _event(msg):
+        try:
+            os.makedirs(SESSION_DIR, exist_ok=True)
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            with open(EVENTS_PATH, "a") as f:
+                f.write(f"{ts} {msg}\n")
+        except Exception:
+            pass
+
+    def _runtime_lost():
+        """Probe the proxy to detect runtime reclamation.
+
+        Returns True only when the proxy is definitively gone (connection
+        refused / DNS failure / HTTP 404-410). Transient network blips are
+        retried once to avoid false positives.
+        """
+        proxy_url = state.get("proxy_url")
+        if not proxy_url:
+            return False
+        for attempt in range(2):
+            try:
+                r = requests.get(f"{proxy_url}/api/sessions",
+                                 headers=_proxy_headers(), timeout=15)
+                if r.status_code == 200:
+                    return False
+                if r.status_code in (404, 410):
+                    return True
+                return True  # 5xx or unexpected: treat as lost
+            except Exception:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                return True
+        return True
 
     def _clear_session_file():
         try:
@@ -355,6 +450,9 @@ def install():
                 time.sleep(3)
         raise RuntimeError(f"timed out creating session {label}: {last_error}")
 
+    def _pop_notice():
+        return state.pop("reclaim_notice", None)
+
     def _ws_request(kernel_id, msg_type, content, timeout=60):
         """Send one kernel-protocol request; return its *_reply content."""
         session_id = uuid.uuid4().hex
@@ -380,6 +478,7 @@ def install():
                 try:
                     raw = ws.recv()
                 except Exception:
+                    time.sleep(0.2)
                     continue
                 if not raw:
                     time.sleep(0.05)
@@ -403,10 +502,16 @@ def install():
         return remote_path.startswith(REMOTE_PREFIXES)
 
     def _upload_bytes(remote_path, data, timeout=120):
-        """Upload bytes; REST contents API first, kernel fallback second."""
+        """Upload bytes; REST contents API first, kernel fallback second.
+
+        Files larger than the kernel fallback limit are automatically chunked
+        into 7 MB parts, uploaded individually, then reassembled on the
+        remote side. Returns a dict with method/bytes/error.
+        """
         if not _remote_ok(remote_path):
             return {"error": f"remote_path must start with {REMOTE_PREFIXES}"}
         b64 = base64.b64encode(data).decode("ascii")
+        rest_reason = None
         if state.get("proxy_url"):
             try:
                 r = requests.put(
@@ -416,26 +521,79 @@ def install():
                     timeout=timeout)
                 if 200 <= r.status_code < 300:
                     return {"method": "rest", "bytes": len(data)}
-            except Exception:
-                pass
-        if len(data) > UPLOAD_FALLBACK_MAX:
-            return {"error": f"file exceeds fallback limit "
-                             f"({UPLOAD_FALLBACK_MAX} bytes) and REST upload "
-                             f"unavailable"}
-        code = (f"import base64, pathlib\n"
-                f"_p = pathlib.Path({remote_path!r})\n"
-                f"_p.parent.mkdir(parents=True, exist_ok=True)\n"
-                f"_p.write_bytes(base64.b64decode({b64!r}))\n"
-                f"print('wrote', _p.stat().st_size)\n")
+                rest_reason = f"HTTP {r.status_code}: {r.text[:200]}"
+            except Exception as e:
+                rest_reason = str(e)[:200]
+        if len(data) <= UPLOAD_FALLBACK_MAX:
+            code = (f"import base64, pathlib\n"
+                    f"_p = pathlib.Path({remote_path!r})\n"
+                    f"_p.parent.mkdir(parents=True, exist_ok=True)\n"
+                    f"_p.write_bytes(base64.b64decode({b64!r}))\n"
+                    f"print('wrote', _p.stat().st_size)\n")
+            out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
+                                         timeout)
+            if rc != 0:
+                return {"error": err[-500:] or "kernel upload failed",
+                        "rest_reason": rest_reason}
+            return {"method": "kernel", "bytes": len(data),
+                    "rest_reason": rest_reason}
+        # Chunked upload for large files
+        CHUNK = 7 * 1024 * 1024
+        parts = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)]
+        part_paths = []
+        for i, chunk in enumerate(parts):
+            pp = f"{remote_path}.part{i:03d}"
+            part_paths.append(pp)
+            cb64 = base64.b64encode(chunk).decode("ascii")
+            if state.get("proxy_url"):
+                try:
+                    r = requests.put(
+                        f"{state['proxy_url']}/api/contents/{pp}",
+                        headers=_proxy_headers(),
+                        json={"type": "file", "format": "base64",
+                              "content": cb64}, timeout=timeout)
+                    if 200 <= r.status_code < 300:
+                        continue
+                except Exception:
+                    pass
+            code = (f"import base64, pathlib\n"
+                    f"_p = pathlib.Path({pp!r})\n"
+                    f"_p.parent.mkdir(parents=True, exist_ok=True)\n"
+                    f"_p.write_bytes(base64.b64decode({cb64!r}))\n"
+                    f"print('wrote', _p.stat().st_size)\n")
+            out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
+                                         timeout)
+            if rc != 0:
+                return {"error": f"chunk {i} failed: {err[-500:]}",
+                        "rest_reason": rest_reason}
+        # Reassemble
+        glob_pat = f"{remote_path}.part*"
+        code = (f"import glob, os\n"
+                f"_parts = sorted(glob.glob({glob_pat!r}))\n"
+                f"assert _parts, 'no parts found'\n"
+                f"_out = {remote_path!r}\n"
+                f"with open(_out, 'wb') as _f:\n"
+                f"    for _p in _parts:\n"
+                f"        _f.write(open(_p, 'rb').read())\n"
+                f"        os.remove(_p)\n"
+                f"print('assembled', os.path.getsize(_out), 'from', len(_parts), 'parts')\n")
         out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
                                      timeout)
         if rc != 0:
-            return {"error": err[-500:] or "kernel upload failed"}
-        return {"method": "kernel", "bytes": len(data)}
+            return {"error": f"reassemble failed: {err[-500:]}"}
+        return {"method": "chunked", "bytes": len(data),
+                "chunks": len(parts), "rest_reason": rest_reason}
 
     def _download_bytes(remote_path, timeout=120):
+        """Download bytes from the runtime.
+
+        Tries the REST contents API first. For files larger than the kernel
+        fallback limit, splits the remote file into 7 MB chunks and fetches
+        each individually, then reassembles locally.
+        """
         if not _remote_ok(remote_path):
             return {"error": f"remote_path must start with {REMOTE_PREFIXES}"}
+        rest_reason = None
         if state.get("proxy_url"):
             try:
                 r = requests.get(
@@ -447,26 +605,92 @@ def install():
                     if model.get("format") == "base64" and model.get("content"):
                         return {"method": "rest",
                                 "data": base64.b64decode(model["content"])}
-            except Exception:
-                pass
-        code = (f"import base64, os\n"
+                    if (model.get("format") == "text"
+                            and isinstance(model.get("content"), str)):
+                        return {"method": "rest",
+                                "data": model["content"].encode("utf-8")}
+                rest_reason = f"HTTP {r.status_code}: {r.text[:200]}"
+            except Exception as e:
+                rest_reason = str(e)[:200]
+        # Check file size first
+        code = (f"import os\n"
                 f"_p = {remote_path!r}\n"
                 f"assert os.path.exists(_p), 'not found: ' + _p\n"
-                f"_sz = os.path.getsize(_p)\n"
-                f"assert _sz <= {UPLOAD_FALLBACK_MAX}, f'too large: {{_sz}}'\n"
-                f"print('DLB64_START')\n"
-                f"print(base64.b64encode(open(_p,'rb').read()).decode('ascii'))\n"
-                f"print('DLB64_END')\n")
+                f"print(os.path.getsize(_p))\n")
         out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
                                      timeout)
-        if rc != 0:
-            return {"error": err[-500:] or "kernel download failed"}
-        start = out.find("DLB64_START")
-        end = out.find("DLB64_END")
-        if start == -1 or end == -1:
-            return {"error": "markers not found in kernel output"}
-        b64 = out[start + len("DLB64_START"):end].strip()
-        return {"method": "kernel", "data": base64.b64decode(b64)}
+        total_size = None
+        if rc == 0:
+            try:
+                total_size = int(out.strip().splitlines()[-1])
+            except Exception:
+                pass
+        if total_size is None:
+            total_size = UPLOAD_FALLBACK_MAX  # fall through to kernel path
+        if total_size <= UPLOAD_FALLBACK_MAX:
+            code = (f"import base64, os\n"
+                    f"_p = {remote_path!r}\n"
+                    f"_sz = os.path.getsize(_p)\n"
+                    f"assert _sz <= {UPLOAD_FALLBACK_MAX}, f'too large: {{_sz}}'\n"
+                    f"print('DLB64_START')\n"
+                    f"print(base64.b64encode(open(_p,'rb').read()).decode('ascii'))\n"
+                    f"print('DLB64_END')\n")
+            out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
+                                         timeout)
+            if rc != 0:
+                return {"error": err[-500:] or "kernel download failed",
+                        "rest_reason": rest_reason}
+            start = out.find("DLB64_START")
+            end = out.find("DLB64_END")
+            if start == -1 or end == -1:
+                return {"error": "markers not found in kernel output",
+                        "rest_reason": rest_reason}
+            b64 = out[start + len("DLB64_START"):end].strip()
+            return {"method": "kernel", "data": base64.b64decode(b64),
+                    "rest_reason": rest_reason}
+        # Chunked download for large files
+        CHUNK = 7 * 1024 * 1024
+        n_chunks = (total_size + CHUNK - 1) // CHUNK
+        all_data = bytearray()
+        for i in range(n_chunks):
+            offset = i * CHUNK
+            length = min(CHUNK, total_size - offset)
+            if state.get("proxy_url"):
+                try:
+                    r = requests.get(
+                        f"{state['proxy_url']}/api/contents/{remote_path}",
+                        headers=_proxy_headers(),
+                        params={"content": 1}, timeout=timeout)
+                    if r.status_code == 200:
+                        model = r.json()
+                        if model.get("format") == "base64" and model.get("content"):
+                            all_data.extend(base64.b64decode(model["content"]))
+                            continue
+                except Exception:
+                    pass
+            code = (f"import base64, os\n"
+                    f"_p = {remote_path!r}\n"
+                    f"_f = open(_p, 'rb')\n"
+                    f"_f.seek({offset})\n"
+                    f"_chunk = _f.read({length})\n"
+                    f"_f.close()\n"
+                    f"print('DLB64_START')\n"
+                    f"print(base64.b64encode(_chunk).decode('ascii'))\n"
+                    f"print('DLB64_END')\n")
+            out, err, rc = _run_on_colab(code, state.get("accelerator", "T4"),
+                                         timeout)
+            if rc != 0:
+                return {"error": f"chunk {i} failed: {err[-500:]}",
+                        "rest_reason": rest_reason}
+            start = out.find("DLB64_START")
+            end = out.find("DLB64_END")
+            if start == -1 or end == -1:
+                return {"error": f"chunk {i}: markers not found",
+                        "rest_reason": rest_reason}
+            b64 = out[start + len("DLB64_START"):end].strip()
+            all_data.extend(base64.b64decode(b64))
+        return {"method": "chunked", "data": bytes(all_data),
+                "chunks": n_chunks, "rest_reason": rest_reason}
 
     # -- core executor ---------------------------------------------------------
 
@@ -474,6 +698,19 @@ def install():
         with lock:
             creds = cr.get_credentials()
             token = creds.token
+
+            if state.get("endpoint") and _runtime_lost():
+                old_ep = state["endpoint"]
+                _event(f"RUNTIME_RECLAIMED {old_ep} — proxy unreachable; "
+                       f"allocating fresh runtime (all /content data lost)")
+                print(f"[persist] RUNTIME RECLAIMED: {old_ep} is gone. "
+                      f"Allocating a fresh runtime.", file=sys.stderr)
+                _drop()
+                state["reclaim_notice"] = (
+                    f"Previous runtime {old_ep} was reclaimed by Google "
+                    f"(idle timeout or quota). All /content data and kernel "
+                    f"variables were lost. A new runtime has been allocated."
+                )
 
             if state.get("endpoint") and state.get("accelerator") != accelerator:
                 _release_old(token)
@@ -573,9 +810,12 @@ def install():
                                            busy_wait)
         cells = srv._parse_cell_output(stdout, num_cells)
         errors = [c for c in cells if c["status"] != "ok"] if rc != 0 else []
-        return json.dumps(
-            {"cells": cells, "errors": errors, "stderr": stderr,
-             "exit_code": rc}, indent=2)
+        result = {"cells": cells, "errors": errors, "stderr": stderr,
+                  "exit_code": rc}
+        notice = _pop_notice()
+        if notice:
+            result["runtime_event"] = notice
+        return json.dumps(result, indent=2)
 
     def colab_kernel_reset() -> str:
         """Drop all kernels and release the GPU runtime.
@@ -895,13 +1135,38 @@ def install():
 
     def colab_execute_detached(code: str, job: str = "job",
                                accelerator: str = "T4", timeout: int = 120,
-                               busy_wait: int = BUSY_WAIT_DEFAULT) -> str:
+                               busy_wait: int = BUSY_WAIT_DEFAULT,
+                               force: bool = False) -> str:
         """Start a long-running job on the warm kernel without blocking.
 
         The code runs in a background thread; this returns once launched.
         Progress (state, live stdout tail) is written to /content/job.json —
-        poll with colab_job_status. One job at a time per kernel.
+        poll with colab_job_status. One job at a time per kernel; set
+        force=True to kill the current job and start a new one.
         """
+        if not force:
+            try:
+                snap = _ensure_warm()
+                kernel_id = snap["kernels"][snap["active"]]
+                expr = ("__import__('json').loads(open('/content/job.json').read()) "
+                        "if __import__('os').path.exists('/content/job.json') "
+                        "else {'state': 'missing'}")
+                reply = _ws_request(kernel_id, "execute_request",
+                                     {"code": "", "silent": True,
+                                      "store_history": False,
+                                      "user_expressions": {"job": expr}})
+                ue = (reply.get("user_expressions") or {}).get("job", {})
+                if ue.get("status") == "ok":
+                    import ast as _ast
+                    st = _ast.literal_eval(
+                        (ue.get("data") or {}).get("text/plain", ""))
+                    if st.get("state") == "running":
+                        return json.dumps({
+                            "job": job, "launched": False,
+                            "error": "a job is already running; "
+                                     "use force=True to replace it"})
+            except Exception:
+                pass
         started = time.time()
         out, err, rc = _run_on_colab(
             JOB_SCRIPT % {"job": job, "code": code}, accelerator, timeout,
@@ -910,6 +1175,9 @@ def install():
                   "elapsed": round(time.time() - started, 1)}
         if rc != 0:
             result["stderr"] = err[-1000:]
+        notice = _pop_notice()
+        if notice:
+            result["runtime_event"] = notice
         return json.dumps(result)
 
     def colab_job_status() -> str:
@@ -958,11 +1226,15 @@ def install():
                                    "active": name})
         _run_on_colab("pass", "T4", 60)
         with lock:
-            if name in state.get("kernels", {}):
-                return json.dumps({"created": name,
-                                   "kernel_id": state["kernels"][name],
-                                   "active": name})
-        return json.dumps({"error": "kernel_new fell back to main; retry"})
+            try:
+                kernel_id = _create_named_session(name)
+            except Exception as exc:
+                return json.dumps({"error": str(exc)})
+            state.setdefault("kernels", {})[name] = kernel_id
+            state["active"] = name
+            _save_session()
+            return json.dumps({"created": name, "kernel_id": kernel_id,
+                               "active": name})
 
     def colab_kernel_list() -> str:
         """List kernels on the warm runtime: ours (named) and any others."""
@@ -1072,7 +1344,28 @@ def install():
                 _save_session()
         return json.dumps({"pruned": pruned, "count": len(pruned)})
 
+    def colab_events(n: int = 20) -> str:
+        """Show the last n events from the runtime event log.
+
+        Events include runtime allocation, reclamation detection, kernel
+        loss/recovery, and session resume. Useful for debugging silent
+        runtime loss.
+        """
+        try:
+            with open(EVENTS_PATH) as f:
+                lines = f.read().strip().splitlines()
+            return json.dumps({"events": lines[-n:], "count": len(lines)})
+        except FileNotFoundError:
+            return json.dumps({"events": [], "count": 0})
+
     def _tool(fn, **hints):
+        # The upstream server already registered a tool under this name;
+        # register the replacement cleanly instead of racing it and
+        # emitting "Tool already exists" warnings on every startup.
+        try:
+            srv.mcp.remove_tool(fn.__name__)
+        except Exception:
+            pass
         return srv.mcp.tool(annotations={"readOnlyHint": False, **hints})(fn)
 
     srv.colab_execute = _tool(colab_execute)
@@ -1097,6 +1390,7 @@ def install():
     srv.colab_kernel_use = _tool(colab_kernel_use)
     srv.colab_kernel_close = _tool(colab_kernel_close, destructiveHint=True)
     srv.colab_kernels_prune = _tool(colab_kernels_prune, destructiveHint=True)
+    srv.colab_events = _tool(colab_events, readOnlyHint=True)
 
     _resume_session()
 

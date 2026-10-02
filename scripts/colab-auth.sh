@@ -1,44 +1,43 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Interactive Google OAuth for Colab. Google's flow prints an authorization
-# URL; on a phone, pasting it is painful, so we open it directly in the
-# browser and wait for the redirect to localhost to complete.
+# Google OAuth for Colab.
+#
+# Uses the standard loopback flow (run_local_server). Android's browser shares
+# the device loopback interface, so the 127.0.0.1:<port> callback does reach
+# Termux. The only thing that has to be fixed is URL delivery: webbrowser.open()
+# finds no desktop browser on Termux, so the consent page is never shown and the
+# flow just hangs. We patch it to hand the URL to the Android browser.
+#
+# Note: google-auth-oauthlib >= 1.0 removed run_console(), and Google blocked
+# the OOB flow anyway, so loopback is the right mechanism here.
 set -euo pipefail
 
-LOG="$(mktemp)"
-cleanup() { rm -f "$LOG"; }
-trap cleanup EXIT
+python3 - <<'PY'
+import subprocess
+import webbrowser
 
-open_url() {
-  local url="$1"
-  if command -v termux-open-url >/dev/null 2>&1; then
-    termux-open-url "$url"
-  elif command -v am >/dev/null 2>&1; then
-    am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1 || true
-  fi
-}
 
-# BROWSER=echo makes Python's webbrowser "open" the URL by echoing it, so we
-# can capture it instead of relying on a desktop browser launcher.
-BROWSER=echo python3 -c \
-  "from mcp_server_colab_exec.colab_runtime import get_credentials; get_credentials()" \
-  >"$LOG" 2>&1 &
-PID=$!
+def _open(url):
+    """Hand the consent URL to the Android browser. Never block on it."""
+    print(f"\nOpen this URL in your browser:\n{url}\n")
+    for cmd in (["termux-open-url", url],
+                ["am", "start", "-a", "android.intent.action.VIEW", "-d", url]):
+        try:
+            subprocess.run(cmd, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+        except (FileNotFoundError, OSError):
+            continue
+    return True
 
-URL=""
-for _ in $(seq 1 10); do
-  sleep 1
-  URL="$(grep -oE 'https://accounts\.google\.com[^[:space:]]+' "$LOG" | head -1 || true)"
-  [ -n "$URL" ] && break
-done
 
-if [ -n "$URL" ]; then
-  echo "Opening consent page in your browser..."
-  open_url "$URL"
-  echo "If it did not open, paste this URL manually:"
-  echo "$URL"
-else
-  echo "Waiting for OAuth (no URL captured yet)..."
-fi
+webbrowser.open = _open
+webbrowser.open_new = _open
+webbrowser.open_new_tab = _open
 
-wait "$PID"
-echo "Authentication complete. Token cached at ~/.config/colab-exec/token.json"
+from mcp_server_colab_exec.colab_runtime import get_credentials
+
+creds = get_credentials()
+
+print("\nAuthentication complete. Token cached at ~/.config/colab-exec/token.json")
+print(f"Valid: {creds.valid}  Expires: {getattr(creds, 'expiry', 'unknown')}")
+PY
