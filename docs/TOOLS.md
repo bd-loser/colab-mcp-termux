@@ -145,6 +145,13 @@ Delete orphan `colab-exec*` sessions on the runtime — kernels left behind
 by crashed processes that this launcher did not register. Pass
 `all_kernels=true` to delete every colab-exec kernel including ours.
 
+### `colab_events`
+
+Show the last `n` entries of the launcher's runtime event log
+(`~/.config/colab-exec/events.log`): allocations, reclamation
+detections, kernel loss/recovery, session resumes. The primary
+debugging tool for "where did my GPU go".
+
 ---
 
 ## Introspection
@@ -254,14 +261,19 @@ colab_expose(port=8081)                               # model never reloads
 
 ## Limits and semantics
 
-- One detached job per kernel; a second `colab_execute_detached` replaces
-  the previous job's status file.
+- One detached job per kernel; a second `colab_execute_detached` refuses
+  while a job is running unless `force=True` (which kills and replaces it).
 - A cell that outlives its `timeout` keeps the kernel busy; follow with
   `colab_interrupt` (kernel kept) or `colab_kernel_restart` (state lost).
 - Quick-tunnel URLs are one-shot and change on re-expose; they are not a
   fixed hostname.
 - `store_history` is on for executed cells (`In[]` grows) — use
   `colab_kernel_restart` to clear.
-- Free-tier runtimes are still reclaimed by Colab (idle/12 h limits); the
-  launcher recovers by reallocating, and Drive-cached model files
-  (`HF_HOME` on Drive) make cold reloads fast.
+- Free-tier runtimes are still reclaimed by Colab (idle/12 h limits). The
+  launcher now detects reclamation instead of silently reallocating: the
+  next tool call reports `runtime_event`, and every allocation/loss goes
+  to the events log — see `colab_events`.
+- Uploads/downloads auto-chunk files above the single-transfer limit
+  (7 MB parts, reassembled on the other side).
+- Keep-alives refresh the OAuth token every minute, so a warm runtime
+  survives token expiry while the MCP process lives.

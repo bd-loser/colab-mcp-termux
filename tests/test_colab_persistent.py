@@ -72,6 +72,8 @@ def fresh(save_path=None, alive=True):
     colab_persistent.SESSION_PATH = save_path  # AFTER reload; reload resets it
     colab_persistent.ENV_SNAPSHOT_PATH = os.path.join(
         os.path.dirname(save_path), "env_snapshot.txt")
+    colab_persistent.EVENTS_PATH = os.path.join(
+        os.path.dirname(save_path), "events.log")
     from mcp_server_colab_exec import colab_runtime as cr
 
     calls = {"alloc": 0, "session": 0, "exec": 0, "ka": 0, "unassign": 0,
@@ -285,6 +287,28 @@ def test_runtime_dead_full_drop():
     t.flag["fail_session"] = False
     t.srv._run_on_colab("c3", "T4", 10)
     assert t.calls["alloc"] == 2, "runtime death must lead to reallocation"
+
+
+def test_reclaim_detected_notice_and_event():
+    t = fresh()
+    t.srv._run_on_colab("c1", "T4", 10)          # alloc e1 + kernel
+    import requests as _rq
+    orig = _rq.get
+
+    def dead_sessions(url, **kw):
+        if "/api/sessions" in url:
+            return FakeResp(404)                 # proxy gone => reclaimed
+        return orig(url, **kw)
+    _rq.get = dead_sessions
+    try:
+        out = json.loads(t.srv.colab_execute("x = 1"))
+    finally:
+        _rq.get = orig
+    assert "runtime_event" in out, out
+    assert "reclaim" in out["runtime_event"].lower()
+    events = open(colab_persistent.EVENTS_PATH).read()
+    assert "RUNTIME_RECLAIMED" in events
+    assert t.calls["alloc"] == 2                 # fresh runtime allocated
 
 
 def test_accelerator_switch_releases_old():

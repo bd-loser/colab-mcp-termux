@@ -32,7 +32,7 @@ SESSION_PATH = os.path.join(SESSION_DIR, "session.json")
 ENV_SNAPSHOT_PATH = os.path.join(SESSION_DIR, "env_snapshot.txt")
 EVENTS_PATH = os.path.join(SESSION_DIR, "events.log")
 BUSY_WAIT_DEFAULT = 10
-UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+UPLOAD_MAX_BYTES = 256 * 1024 * 1024  # big files auto-chunk in 7 MB parts
 UPLOAD_FALLBACK_MAX = 8 * 1024 * 1024
 REMOTE_PREFIXES = ("/content", "/tmp")
 
@@ -323,7 +323,7 @@ def install():
                     return False
                 if r.status_code in (404, 410):
                     return True
-                return True  # 5xx or unexpected: treat as lost
+                return False  # 5xx etc: transient proxy issue, keep session
             except Exception:
                 if attempt == 0:
                     time.sleep(2)
@@ -1057,7 +1057,8 @@ def install():
         """Upload a local file to the Colab runtime (/content or /tmp).
 
         Tries the Jupyter contents REST API, falls back to a kernel cell.
-        Max 25 MB (REST) / 8 MB (fallback).
+        Files larger than the fallback limit are uploaded in 7 MB chunks
+        and reassembled on the runtime. Max 256 MB.
         """
         file_path = os.path.expanduser(file_path)
         if not os.path.isfile(file_path):
@@ -1076,6 +1077,8 @@ def install():
         """Download a file from the Colab runtime to the phone.
 
         Tries the Jupyter contents REST API, falls back to a kernel cell.
+        Files larger than the fallback limit are split remotely into 7 MB
+        chunks, fetched part by part, and reassembled locally.
         """
         file_path = os.path.expanduser(file_path)
         result = _download_bytes(remote_path, timeout)

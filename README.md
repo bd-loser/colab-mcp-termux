@@ -13,7 +13,7 @@
 `pip` cannot build it, and mobile DNS often breaks Colab outright. This
 project ships a **one-command installer** plus two launchers — a
 **DNS-over-HTTPS wrapper** and a **persistent-kernel launcher** exposing
-**23 MCP tools** — verified end-to-end on a real Tesla T4.
+**24 MCP tools** — verified end-to-end on a real Tesla T4.
 
 ```
 python 3.13.15 | torch 2.11.0+cu128 | cuda True | gpu Tesla T4
@@ -72,7 +72,7 @@ Full example: [`examples/opencode.mcp.json`](examples/opencode.mcp.json).
 
 ## What you get
 
-**23 MCP tools** (full reference: [`docs/TOOLS.md`](docs/TOOLS.md)):
+**24 MCP tools** (full reference: [`docs/TOOLS.md`](docs/TOOLS.md)):
 
 | Category | Tools |
 |---|---|
