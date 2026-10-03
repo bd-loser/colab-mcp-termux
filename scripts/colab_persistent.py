@@ -258,6 +258,53 @@ def install():
         except Exception:
             pass
 
+    def _start_keepalive(token, endpoint):
+        """Keep the runtime alive, surviving OAuth token expiry.
+
+        Upstream start_keepalive captures the token once; it expires after
+        ~1h, later keep-alives 401, Colab marks the runtime idle and
+        reclaims it — the silent runtime-loss root cause. This wrapper
+        starts the upstream pinger AND a token-refreshing pinger; either
+        keeps the runtime warm while the process lives.
+        """
+        try:
+            up_event = cr.start_keepalive(token, endpoint)
+        except Exception:
+            up_event = None
+        stop_event = threading.Event()
+
+        def loop():
+            while not stop_event.is_set():
+                tok = token
+                try:
+                    tok = cr.get_credentials().token
+                except Exception:
+                    pass
+                try:
+                    requests.get(
+                        f"{getattr(cr, 'COLAB_API', 'https://colab.research.google.com/v2')}"
+                        f"/tun/m/{endpoint}/keep-alive/",
+                        headers=cr._colab_headers(
+                            tok, {"X-Colab-Tunnel": "Google"}),
+                        params={"authuser": "0"}, timeout=10)
+                except Exception:
+                    pass
+                stop_event.wait(60)
+
+        threading.Thread(target=loop, daemon=True).start()
+        _up = up_event
+        _orig = stop_event.set
+
+        def combined_set():
+            _orig()
+            if _up is not None:
+                try:
+                    _up.set()
+                except Exception:
+                    pass
+        stop_event.set = combined_set
+        return stop_event
+
     def _runtime_lost():
         """Probe the proxy to detect runtime reclamation.
 
@@ -354,7 +401,7 @@ def install():
             creds = cr.get_credentials()
         except Exception:
             return
-        stop_event = cr.start_keepalive(creds.token, saved["endpoint"])
+        stop_event = _start_keepalive(creds.token, saved["endpoint"])
         state.update(
             endpoint=saved["endpoint"], proxy_url=saved["proxy_url"],
             proxy_token=saved["proxy_token"],
@@ -733,7 +780,7 @@ def install():
                     except Exception:
                         pass
                     assignment = cr.allocate_runtime(token, alloc_acc)
-                stop_event = cr.start_keepalive(token, assignment["endpoint"])
+                stop_event = _start_keepalive(token, assignment["endpoint"])
                 state.update(
                     endpoint=assignment["endpoint"],
                     proxy_url=assignment["proxy_url"],
