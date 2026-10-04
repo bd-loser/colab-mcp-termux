@@ -39,6 +39,51 @@ REMOTE_PREFIXES = ("/content", "/tmp")
 # Module-level so callers (tests, batteries) can introspect the warm session.
 state = {}
 
+# Populated by install(): name -> bound tool function, for CLI reuse.
+TOOLS = {}
+
+WATCH_PATH = os.path.join(SESSION_DIR, "watch.json")
+RESPAWN = {"cfg": None}
+RESPAWN_LOCK = threading.Lock()
+
+
+def _watch_decision(job_state, cfg, tries):
+    """Pure watchdog decision.
+
+    job_state: 'running' | 'done' | 'error' | None (probe failed) |
+               other (job.json missing = runtime died or was reset)
+    Returns one of: 'wait', 'watch', 'respawn', 'stop'.
+    """
+    if job_state == "running":
+        return "watch"
+    if not cfg or not cfg.get("armed"):
+        return "wait"
+    if job_state in ("done", "error"):
+        return "stop"
+    if job_state is None:
+        return "wait"
+    if tries >= cfg.get("max", 0):
+        return "stop"
+    return "respawn"
+
+
+def _parse_respawn_files(s):
+    """'local1::/remote1, local2::/remote2' -> [(local1, /remote1), ...]."""
+    uploads = []
+    for pair in (s or "").split(","):
+        pair = pair.strip()
+        if not pair or "::" not in pair:
+            continue
+        local, _, remote = pair.partition("::")
+        if local.strip() and remote.strip().startswith(REMOTE_PREFIXES):
+            uploads.append((local.strip(), remote.strip()))
+    return uploads
+
+
+def _backoff_delay(attempt, base=10, cap=240):
+    """Exponential backoff: base * 2**(attempt-1), capped at cap seconds."""
+    return min(cap, base * (2 ** max(0, attempt - 1)))
+
 JOB_SCRIPT = '''
 import json as _json, threading as _threading, traceback as _tb, time as _time
 import io as _io, sys as _sys
@@ -741,6 +786,33 @@ def install():
 
     # -- core executor ---------------------------------------------------------
 
+    def _alloc_with_backoff(token, alloc_acc, budget=900):
+        """allocate_runtime with Google capacity-wait backoff on 429/5xx.
+
+        Without this every tool call surfaces a raw 503 while Google is
+        rate-limiting assignments; instead we wait (10s..240s steps) up to
+        `budget` seconds, logging each wait as an event.
+        """
+        t0 = time.time()
+        attempt = 0
+        while True:
+            try:
+                return cr.allocate_runtime(token, alloc_acc)
+            except requests.HTTPError as exc:
+                code = getattr(exc.response, "status_code", 0) or 0
+                attempt += 1
+                wait = _backoff_delay(attempt)
+                if (code in (408, 425, 429, 500, 502, 503, 504)
+                        and time.time() - t0 + wait < budget):
+                    _event(f"ASSIGN_{code} retry_in={wait}s "
+                           f"(t={int(time.time() - t0)}s)")
+                    print(f"[persist] assign {code}; waiting {wait}s "
+                          f"({int(time.time() - t0)}s elapsed)",
+                          file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                raise
+
     def _run_on_colab(code, accelerator, timeout, busy_wait=BUSY_WAIT_DEFAULT):
         with lock:
             creds = cr.get_credentials()
@@ -766,7 +838,7 @@ def install():
                 # CPU runtimes allocate with an empty accelerator (no variant).
                 alloc_acc = "" if accelerator == "CPU" else accelerator
                 try:
-                    assignment = cr.allocate_runtime(token, alloc_acc)
+                    assignment = _alloc_with_backoff(token, alloc_acc)
                 except Exception as exc:
                     # Colab allows one runtime per account; a leftover
                     # assignment (e.g. crashed process) causes 412. Discover
@@ -779,7 +851,7 @@ def install():
                         cr.unassign_runtime(token, leftover["endpoint"])
                     except Exception:
                         pass
-                    assignment = cr.allocate_runtime(token, alloc_acc)
+                    assignment = _alloc_with_backoff(token, alloc_acc)
                 stop_event = _start_keepalive(token, assignment["endpoint"])
                 state.update(
                     endpoint=assignment["endpoint"],
@@ -840,6 +912,108 @@ def install():
         _run_on_colab("pass", state.get("accelerator", "T4") if state.get(
             "endpoint") else "T4", 60)
         return _snap()
+
+    def _watch_write(**kw):
+        data = {}
+        try:
+            with open(WATCH_PATH) as f:
+                data = json.load(f)
+        except Exception:
+            pass
+        data.update(kw)
+        try:
+            tmp = WATCH_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, WATCH_PATH)
+        except Exception:
+            pass
+
+    def _probe_job_state():
+        """State string of /content/job.json; None if the probe itself fails
+        (kernel/proxy unreachable — runtime probably dead)."""
+        if not state.get("endpoint"):
+            return "missing"
+        kid = _active_id()
+        if kid is None:
+            return "missing"
+        expr = ("__import__('json').loads(open('/content/job.json')"
+                ".read()).get('state','?') "
+                "if __import__('os').path.exists('/content/job.json') "
+                "else 'missing'")
+        try:
+            reply = _ws_request(kid, "execute_request",
+                                {"code": "", "silent": True,
+                                 "store_history": False,
+                                 "user_expressions": {"w": expr}})
+            ue = (reply.get("user_expressions") or {}).get("w", {})
+            return ast.literal_eval(
+                (ue.get("data") or {}).get("text/plain", "'?'"))
+        except Exception:
+            return None
+
+    def _respawn_once(cfg):
+        """Re-allocate (with capacity backoff), re-upload files, relaunch job."""
+        _run_on_colab("pass", cfg.get("accelerator", "T4"),
+                      cfg.get("alloc_timeout", 700), 3)
+        for local, remote in cfg["uploads"]:
+            with open(local, "rb") as f:
+                res = _upload_bytes(remote, f.read(), timeout=300)
+            if res.get("error"):
+                raise RuntimeError(f"upload {remote}: {res['error']}")
+        _run_on_colab(JOB_SCRIPT % {"job": cfg["job"], "code": cfg["code"]},
+                      cfg.get("accelerator", "T4"), 90, 5)
+
+    def _watchdog_loop():
+        tries = 0
+        dead_streak = 0
+        while True:
+            cfg = RESPAWN.get("cfg")
+            time.sleep((cfg or {}).get("poll", 20))
+            cfg = RESPAWN.get("cfg")
+            if not cfg or not cfg.get("armed"):
+                continue
+            st = _probe_job_state()
+            if st is None:
+                dead_streak += 1
+                if dead_streak >= 2:
+                    try:
+                        _run_on_colab("pass", cfg.get("accelerator", "T4"),
+                                      cfg.get("alloc_timeout", 700), 3)
+                        _event(f"WATCH_REALLOC {cfg['job']} -> "
+                               f"{state.get('endpoint')}")
+                    except Exception as exc:
+                        _event(f"WATCH_REALLOC_FAIL {str(exc)[:150]}")
+                        dead_streak = 0
+                        continue
+                continue
+            dead_streak = 0
+            action = _watch_decision(st, cfg, tries)
+            if action == "watch":
+                _watch_write(job=cfg["job"], state="running",
+                             endpoint=state.get("endpoint"),
+                             running_at=time.time())
+            elif action == "stop":
+                _event(f"WATCH_JOB_{str(st).upper()} {cfg['job']}")
+                _watch_write(job=cfg["job"], state=st, ended=time.time())
+                with RESPAWN_LOCK:
+                    RESPAWN["cfg"] = None
+                tries = 0
+            elif action == "respawn":
+                tries += 1
+                _event(f"WATCH_RESPAWN {cfg['job']} try={tries}/{cfg['max']} "
+                       f"(state={st})")
+                try:
+                    _respawn_once(cfg)
+                    _watch_write(job=cfg["job"], state="running",
+                                 respawns=tries,
+                                 endpoint=state.get("endpoint"))
+                except Exception as exc:
+                    _event(f"WATCH_RESPAWN_FAIL {str(exc)[:200]}")
+                    if tries >= cfg.get("max", 0):
+                        with RESPAWN_LOCK:
+                            RESPAWN["cfg"] = None
+                        tries = 0
 
     # -- tools -----------------------------------------------------------------
 
@@ -1186,13 +1360,23 @@ def install():
     def colab_execute_detached(code: str, job: str = "job",
                                accelerator: str = "T4", timeout: int = 120,
                                busy_wait: int = BUSY_WAIT_DEFAULT,
-                               force: bool = False) -> str:
+                               force: bool = False,
+                               respawn_files: str = "",
+                               respawn_max: int = 0,
+                               respawn_poll: int = 20) -> str:
         """Start a long-running job on the warm kernel without blocking.
 
         The code runs in a background thread; this returns once launched.
         Progress (state, live stdout tail) is written to /content/job.json —
         poll with colab_job_status. One job at a time per kernel; set
         force=True to kill the current job and start a new one.
+
+        Auto-respawn across Google reclaims: respawn_files is a comma list of
+        "LOCAL::/remote/path" pairs that must exist for the job to run;
+        respawn_max is how many times a watchdog thread should wait for a new
+        runtime, re-upload those files and relaunch this code if the job dies
+        with the runtime. Watch activity: colab_events + ~/.config/colab-exec/
+        watch.json. Stop it with colab_watchdog_stop.
         """
         if not force:
             try:
@@ -1225,6 +1409,27 @@ def install():
                   "elapsed": round(time.time() - started, 1)}
         if rc != 0:
             result["stderr"] = err[-1000:]
+        with RESPAWN_LOCK:
+            if rc == 0 and respawn_max > 0:
+                uploads = _parse_respawn_files(respawn_files)
+                for local, remote in uploads:
+                    result.setdefault("respawn_files",
+                                      []).append(f"{local}::{remote}")
+                RESPAWN["cfg"] = {"job": job, "code": code, "armed": True,
+                                  "max": respawn_max, "uploads": uploads,
+                                  "poll": max(15, respawn_poll),
+                                  "accelerator": accelerator}
+                _watch_write(job=job, state="running", armed=True,
+                             max_respawns=respawn_max,
+                             endpoint=state.get("endpoint"),
+                             launched=time.time())
+                _event(f"WATCH_ARM {job} max={respawn_max} "
+                       f"files={len(uploads)}")
+                result["watchdog"] = "armed"
+            elif respawn_max == 0 and RESPAWN.get("cfg"):
+                RESPAWN["cfg"] = None
+                _event("WATCH_DISARM")
+                result["watchdog"] = "disarmed-previous"
         notice = _pop_notice()
         if notice:
             result["runtime_event"] = notice
@@ -1246,11 +1451,25 @@ def install():
             try:
                 data = ast.literal_eval(
                     (ue.get("data") or {}).get("text/plain", ""))
+                if isinstance(data, dict):
+                    data["watchdog"] = bool(
+                        (RESPAWN.get("cfg") or {}).get("armed"))
                 return json.dumps(data)
             except Exception:
                 pass
         return json.dumps({"state": "unknown",
-                           "error": ue.get("evalue", "probe failed")})
+                           "error": ue.get("evalue", "probe failed"),
+                           "watchdog": bool(
+                               (RESPAWN.get("cfg") or {}).get("armed"))})
+
+    def colab_watchdog_stop() -> str:
+        """Stop the detached-job watchdog (auto-respawn on runtime death)."""
+        with RESPAWN_LOCK:
+            had = bool((RESPAWN.get("cfg") or {}).get("armed"))
+            RESPAWN["cfg"] = None
+        if had:
+            _event("WATCH_DISARM manual")
+        return json.dumps({"was_armed": had})
 
     def colab_kernel_new(name: str) -> str:
         """Create a second kernel on the same runtime and switch to it.
@@ -1416,6 +1635,7 @@ def install():
             srv.mcp.remove_tool(fn.__name__)
         except Exception:
             pass
+        TOOLS[fn.__name__] = fn
         return srv.mcp.tool(annotations={"readOnlyHint": False, **hints})(fn)
 
     srv.colab_execute = _tool(colab_execute)
@@ -1435,12 +1655,16 @@ def install():
     srv.colab_expose_status = _tool(colab_expose_status, readOnlyHint=True)
     srv.colab_execute_detached = _tool(colab_execute_detached)
     srv.colab_job_status = _tool(colab_job_status, readOnlyHint=True)
+    srv.colab_watchdog_stop = _tool(colab_watchdog_stop)
     srv.colab_kernel_new = _tool(colab_kernel_new, destructiveHint=True)
     srv.colab_kernel_list = _tool(colab_kernel_list, readOnlyHint=True)
     srv.colab_kernel_use = _tool(colab_kernel_use)
     srv.colab_kernel_close = _tool(colab_kernel_close, destructiveHint=True)
     srv.colab_kernels_prune = _tool(colab_kernels_prune, destructiveHint=True)
     srv.colab_events = _tool(colab_events, readOnlyHint=True)
+
+    threading.Thread(target=_watchdog_loop, name="colab-watchdog",
+                     daemon=True).start()
 
     _resume_session()
 

@@ -807,6 +807,33 @@ def test_install_no_duplicate_tool_warnings():
     assert not dupes, dupes
 
 
+def test_watch_decision_matrix():
+    d = colab_persistent._watch_decision
+    cfg = {"armed": True, "max": 3}
+    assert d("running", cfg, 0) == "watch"
+    assert d("done", cfg, 0) == "stop"
+    assert d("error", cfg, 0) == "stop"
+    assert d(None, cfg, 0) == "wait"          # probe failed, not lost yet
+    assert d("missing", cfg, 0) == "respawn"  # runtime died with the job
+    assert d("missing", cfg, 2) == "respawn"
+    assert d("missing", cfg, 3) == "stop"     # respawn budget spent
+    assert d("missing", None, 0) == "wait"    # not armed
+    assert d("missing", {"armed": False, "max": 5}, 0) == "wait"
+
+
+def test_backoff_delay_growth():
+    f = colab_persistent._backoff_delay
+    assert f(1) == 10 and f(2) == 20 and f(3) == 40
+    assert f(20) == 240  # capped
+
+
+def test_parse_respawn_files():
+    p = colab_persistent._parse_respawn_files
+    got = p(" /a/x.py::/content/x.py , junk , b::/tmp/y , c::/etc/z ")
+    assert got == [("/a/x.py", "/content/x.py"), ("b", "/tmp/y")], got
+    assert p("") == [] and p(None) == []
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
