@@ -294,6 +294,16 @@ def install():
         except Exception as exc:
             print(f"[persist] session save failed: {exc}", file=sys.stderr)
 
+    def _notify(msg):
+        try:
+            import subprocess
+            subprocess.run(
+                ["termux-notification", "--id", "77", "--title", "colab-mcp",
+                 "-c", str(msg)[:140]],
+                timeout=10, capture_output=True)
+        except Exception:
+            pass
+
     def _event(msg):
         try:
             os.makedirs(SESSION_DIR, exist_ok=True)
@@ -302,6 +312,12 @@ def install():
                 f.write(f"{ts} {msg}\n")
         except Exception:
             pass
+        if any(k in msg for k in ("WATCH", "RECLAIM", "ASSIGN", "SHIP")):
+            try:
+                threading.Thread(target=_notify, args=(msg,),
+                                 daemon=True).start()
+            except Exception:
+                pass
 
     def _start_keepalive(token, endpoint):
         """Keep the runtime alive, surviving OAuth token expiry.
@@ -930,27 +946,31 @@ def install():
             pass
 
     def _probe_job_state():
-        """State string of /content/job.json; None if the probe itself fails
-        (kernel/proxy unreachable — runtime probably dead)."""
+        """(state, [manifest names]) from /content/job.json + manifests;
+        state None if the probe itself fails (runtime probably dead)."""
         if not state.get("endpoint"):
-            return "missing"
+            return "missing", []
         kid = _active_id()
         if kid is None:
-            return "missing"
-        expr = ("__import__('json').loads(open('/content/job.json')"
+            return "missing", []
+        expr = ("("
+                "__import__('json').loads(open('/content/job.json')"
                 ".read()).get('state','?') "
                 "if __import__('os').path.exists('/content/job.json') "
-                "else 'missing'")
+                "else 'missing', "
+                "sorted(__import__('os').path.basename(m) for m in "
+                "__import__('glob').glob('/content/manifest_*.txt')))")
         try:
             reply = _ws_request(kid, "execute_request",
                                 {"code": "", "silent": True,
                                  "store_history": False,
                                  "user_expressions": {"w": expr}})
             ue = (reply.get("user_expressions") or {}).get("w", {})
-            return ast.literal_eval(
-                (ue.get("data") or {}).get("text/plain", "'?'"))
+            st, mans = ast.literal_eval(
+                (ue.get("data") or {}).get("text/plain", "('?', [])"))
+            return st, list(mans)
         except Exception:
-            return None
+            return None, []
 
     def _respawn_once(cfg):
         """Re-allocate (with capacity backoff), re-upload files, relaunch job."""
@@ -967,13 +987,18 @@ def install():
     def _watchdog_loop():
         tries = 0
         dead_streak = 0
+        seen_ships = set()
         while True:
             cfg = RESPAWN.get("cfg")
             time.sleep((cfg or {}).get("poll", 20))
             cfg = RESPAWN.get("cfg")
             if not cfg or not cfg.get("armed"):
                 continue
-            st = _probe_job_state()
+            st, mans = _probe_job_state()
+            for m in mans:
+                if m not in seen_ships:
+                    seen_ships.add(m)
+                    _event(f"SHIP_READY {m}")
             if st is None:
                 dead_streak += 1
                 if dead_streak >= 2:
@@ -982,6 +1007,7 @@ def install():
                                       cfg.get("alloc_timeout", 700), 3)
                         _event(f"WATCH_REALLOC {cfg['job']} -> "
                                f"{state.get('endpoint')}")
+                        seen_ships.clear()
                     except Exception as exc:
                         _event(f"WATCH_REALLOC_FAIL {str(exc)[:150]}")
                         dead_streak = 0
@@ -1008,6 +1034,7 @@ def install():
                     _watch_write(job=cfg["job"], state="running",
                                  respawns=tries,
                                  endpoint=state.get("endpoint"))
+                    seen_ships.clear()
                 except Exception as exc:
                     _event(f"WATCH_RESPAWN_FAIL {str(exc)[:200]}")
                     if tries >= cfg.get("max", 0):
