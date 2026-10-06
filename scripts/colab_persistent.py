@@ -1037,6 +1037,12 @@ def install():
                     seen_ships.clear()
                 except Exception as exc:
                     _event(f"WATCH_RESPAWN_FAIL {str(exc)[:200]}")
+                    if "412" in str(exc):
+                        # GPU quota wall: waiting is not a failed try.
+                        tries = max(0, tries - 1)
+                        _event("WATCH_QUOTA_WAIT 300s")
+                        time.sleep(300)
+                        continue
                     if tries >= cfg.get("max", 0):
                         with RESPAWN_LOCK:
                             RESPAWN["cfg"] = None
